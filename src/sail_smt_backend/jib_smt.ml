@@ -1238,7 +1238,13 @@ end) : Jib_compile.CONFIG = struct
       match aexp with
       | AE_typ (aexp, typ) -> (AE_typ (analyze ctx aexp, typ), annot)
       | AE_assign (alexp, aexp) -> (AE_assign (alexp, analyze ctx aexp), annot)
-      | AE_short_circuit (op, aval, aexp) -> (AE_short_circuit (op, aval, analyze ctx aexp), annot)
+      | AE_short_circuit (op, aval, aexp) ->
+          let annot =
+            if is_pure_aexp ctx.effect_info aexp then
+              { annot with uannot = add_attribute (gen_loc loc) "anf_pure" None uannot }
+            else annot
+          in
+          (AE_short_circuit (op, aval, analyze ctx aexp), annot)
       | AE_let (mut, id, typ1, aexp1, (AE_aux (_, { env = env2; _ }) as aexp2), typ2) ->
           let aexp1 = analyze ctx aexp1 in
           (* Use aexp2's environment because it will contain constraints for id *)

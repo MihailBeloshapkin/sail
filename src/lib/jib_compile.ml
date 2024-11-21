@@ -1030,7 +1030,10 @@ module Make (C : CONFIG) = struct
     | AE_short_circuit (SC_and, aval, aexp) ->
         let left_setup, cval, left_cleanup = compile_aval l ctx aval in
         let right_setup, call, right_cleanup = compile_aexp ctx aexp in
-        if C.eager_control_flow && can_optimize_control_flow_order ctx then (
+        if
+          C.eager_control_flow
+          && (can_optimize_control_flow_order ctx || Option.is_some (get_attribute "anf_pure" uannot))
+        then (
           let gs = ngensym () in
           ( left_setup @ right_setup @ [idecl l CT_bool gs; call (CL_id (gs, CT_bool))],
             (fun clexp -> icopy l clexp (V_call (Band, [cval; V_id (gs, CT_bool)]))),
@@ -1058,10 +1061,13 @@ module Make (C : CONFIG) = struct
     | AE_short_circuit (SC_or, aval, aexp) ->
         let left_setup, cval, left_cleanup = compile_aval l ctx aval in
         let right_setup, call, right_cleanup = compile_aexp ctx aexp in
-        if C.eager_control_flow && can_optimize_control_flow_order ctx then (
+        if
+          C.eager_control_flow
+          && (can_optimize_control_flow_order ctx || Option.is_some (get_attribute "anf_pure" uannot))
+        then (
           let gs = ngensym () in
           ( left_setup @ right_setup @ [idecl l CT_bool gs; call (CL_id (gs, CT_bool))],
-            (fun clexp -> icopy l clexp (V_call (Band, [cval; V_id (gs, CT_bool)]))),
+            (fun clexp -> icopy l clexp (V_call (Bor, [cval; V_id (gs, CT_bool)]))),
             right_cleanup @ left_cleanup
           )
         )
