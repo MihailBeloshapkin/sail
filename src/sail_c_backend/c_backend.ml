@@ -70,6 +70,7 @@ let opt_prefix = ref "z"
 let opt_extra_params = ref None
 let opt_extra_arguments = ref None
 let opt_branch_coverage = ref None
+let opt_avx2 = ref false
 
 let extra_params () = match !opt_extra_params with Some str -> str ^ ", " | _ -> ""
 
@@ -2106,6 +2107,7 @@ let compile_ast env effect_info output_chan c_includes ast =
       separate hardline
         ((if !opt_no_lib then [] else [string "#include \"sail.h\""])
         @ (if !opt_no_rts then [] else [string "#include \"rts.h\""; string "#include \"elf.h\""])
+        @ (if !opt_avx2 then [string "#include \"avx2.h\""] else [])
         @ coverage_include
         @ List.map (fun h -> string (Printf.sprintf "#include \"%s\"" h)) c_includes
         @ [string "#ifdef __cplusplus"; string "extern \"C\" {"; string "#endif"]

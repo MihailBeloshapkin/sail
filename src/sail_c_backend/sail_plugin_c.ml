@@ -105,6 +105,7 @@ let c_options =
       " assume fixed size bitvectors rather than arbitrary precision bitvectors"
     );
     ("-static", Arg.Set C_backend.opt_static, " make generated C functions static");
+    ("-avx2", Arg.Set C_backend.opt_avx2, " add AVX2 vector functions")
   ]
 
 let c_rewrites =

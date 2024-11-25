@@ -57,6 +57,8 @@ val opt_static : bool ref
 (** Do not generate a main function *)
 val opt_no_main : bool ref
 
+val opt_avx2 : bool ref
+
 (** (WIP) Do not include rts.h (the runtime), and do not generate code
    that requires any setup or teardown routines to be run by a runtime
    before executing any instruction semantics. *)
