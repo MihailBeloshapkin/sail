@@ -733,6 +733,133 @@ let hoist_allocations recursive_functions = function
         ]
   | cdef -> [cdef]
 
+
+let uid_cnt = ref 0
+let mk_uniq id =
+  print_endline ("mk_uniq " ^ string_of_id id);
+  let new_id = string_of_id id ^ string_of_int !uid_cnt |> mk_id in
+  incr uid_cnt;
+  name new_id
+
+let startup_vecs = ref []
+
+let is_hoist_vec = function
+  | CT_vector CT_lbits | CT_vector CT_lint | CT_fvector (_, CT_lbits) | CT_fvector (_, CT_lint) -> true
+  | _ -> false
+
+let vec_extraction il =
+  let d = ref [] in
+  let old_names = ref [] in
+  let renames = ref [] in
+  let rec sub = function
+    | I_aux (I_decl (ct, Name (n, i)), ia) :: tail when is_hoist_vec ct ->
+        let hid = mk_uniq n in
+        (*old_names := name :: !old_names;*)
+        print_endline ("vector: " ^ string_of_id n);
+        d := (hid, ct, snd ia) :: !d;
+        renames := (name, Name (n, i)) :: !renames;
+        let new_tail = instrs_rename (Name (n, i)) hid tail in
+        (*I_aux (I_decl (ct, Name (n, i)), ia) :: *)
+        sub new_tail
+    | I_aux (I_clear (ct, Name (n, i)), _) :: tail when is_hoist_vec ct -> sub tail
+    | I_aux (I_block il, ia) :: tail -> I_aux (I_block (sub il), ia) :: sub tail
+    | I_aux (I_if (cval, then_instrs, else_instrs, ctyp), annot) :: instrs ->
+        I_aux (I_if (cval, sub then_instrs, sub else_instrs, ctyp), annot) :: sub instrs
+    | I_aux (I_try_block block, annot) :: instrs -> I_aux (I_try_block (sub block), annot) :: sub instrs
+    | h :: t -> h :: sub t
+    | [] -> []
+  in
+  let res = sub il in
+  (res, !d, !old_names, !renames)
+
+
+let insert_to_startup cdl new_instrs fid =
+  let rec loop = function
+    | CDEF_aux (CDEF_startup (function_id, decls), ann) :: t when string_of_id function_id = string_of_id fid ->
+        let new_decls = new_instrs |> List.map (fun (name, ct, l) -> idecl l ct name) in
+        [CDEF_aux (CDEF_startup (function_id, decls @ new_decls), ann)] @ loop t
+    | CDEF_aux (CDEF_finish (function_id, clears), ann) :: t when string_of_id function_id = string_of_id fid ->
+        let new_clears = new_instrs |> List.map (fun (name, ct, l) -> iclear ct name) in
+        [CDEF_aux (CDEF_finish (function_id, clears @ new_clears), ann)] @ loop t
+    | h :: t -> h :: loop t
+    | [] -> []
+  in
+  loop cdl
+
+
+let check_vectors_in_clause defs =
+  let rec check_branch id = function
+    | I_aux (I_funcall (CR_one (CL_id (name, ct)), se, (fid, ctl), ctv), ia) :: tail
+      when string_of_id fid = string_of_id id ->
+        false
+    | I_aux (I_if (cv, il1, il2, ct), _) :: tail ->
+        if check_branch id il1 && check_branch id il2 then check_branch id tail else false
+    | I_aux (I_block il, ia) :: tail -> if check_branch id il then check_branch id tail else false
+    | I_aux (I_try_block block, annot) :: instrs -> if check_branch id block then check_branch id instrs else false
+    | _ :: t -> check_branch id t
+    | _ -> true
+  in
+  
+  let find_patterns id insts =
+    let acc = ref [] in
+    let rec find x =
+      match x with
+      | I_aux (I_label str0, ia0) 
+        :: I_aux (I_block (I_aux (I_jump (V_ctor_kind (cv, (id, ctl), ct), i), ia2) :: old_branch), ia3)
+        :: other when check_branch id old_branch ->
+          (*print_endline ("PATTERN FOUND 1 " ^ str0);*)
+          let new_branch, d, old_names, renames = vec_extraction old_branch in
+          acc := d @ !acc;
+          I_aux (I_label str0, ia0)
+          :: I_aux (I_block (I_aux (I_jump (V_ctor_kind (cv, (id, ctl), ct), i), ia2) :: new_branch), ia3)
+          :: find other
+      | h :: t ->
+        h :: find t
+      | [] -> []
+    in
+    let new_insts = find insts in 
+    new_insts, !acc
+  in
+
+  let rec loop = function
+    | CDEF_aux (CDEF_fundef (function_id, heap_return, args, body), def_annot) :: other ->
+        print_endline "EXECUTE FOUND";
+        let new_body, vectors = find_patterns function_id body in
+        let new_decls = vectors |> List.map (fun (name, ct, l) -> idecl l ct name) in
+        let new_clears = vectors |> List.map (fun (name, ct, l) -> iclear ct name) in
+        let new_startup =
+          CDEF_aux (CDEF_startup (function_id, List.rev new_decls), mk_def_annot (gen_loc def_annot.loc) ())
+        in
+        let new_finish =
+          CDEF_aux (CDEF_finish (function_id, List.rev new_clears), mk_def_annot (gen_loc def_annot.loc) ())
+        in 
+        new_startup :: CDEF_aux (CDEF_fundef (function_id, heap_return, args, new_body), def_annot) :: new_finish :: loop other
+    | h :: t -> h :: loop t
+    | _ -> []
+  in
+
+  let new_defs = loop defs in
+  new_defs
+
+
+let check_vectors recursive_functions defs =
+  let vectors = ref [] in
+  let rec loop = function
+    | CDEF_aux (CDEF_fundef (function_id, heap_return, args, body), def_annot) :: other
+      when IdSet.mem function_id recursive_functions ->
+        CDEF_aux (CDEF_fundef (function_id, heap_return, args, body), def_annot) :: loop other
+    | CDEF_aux (CDEF_fundef (function_id, heap_return, args, body), def_annot) :: other ->
+        let new_branch, d, old_names, renames = vec_extraction body in
+        vectors := (function_id, d) :: !vectors;
+        CDEF_aux (CDEF_fundef (function_id, heap_return, args, new_branch), def_annot) :: loop other
+    | h :: t -> h :: loop t
+    | [] -> []
+  in
+  let defs = loop defs in
+  let defs = List.fold_left (fun acc (fid, vec) -> insert_to_startup acc vec fid) defs !vectors in
+  defs
+
+
 let removed = icomment "REMOVED"
 
 let is_not_removed = function I_aux (I_comment "REMOVED", _) -> false | _ -> true
@@ -873,6 +1000,7 @@ let combine_variables = visit_cdefs (new Combine_variables.visitor)
 
 let concatMap f xs = List.concat (List.map f xs)
 
+
 let optimize recursive_functions cdefs =
   let nothing cdefs = cdefs in
   cdefs
@@ -880,7 +1008,14 @@ let optimize recursive_functions cdefs =
   |> (if !optimize_alias then combine_variables else nothing)
   (* We need the runtime to initialize hoisted allocations *)
   |>
-  if !optimize_hoist_allocations && not !opt_no_rts then concatMap (hoist_allocations recursive_functions) else nothing
+  (if !optimize_hoist_allocations && not !opt_no_rts then
+    concatMap (recursive_functions |> hoist_allocations ) else nothing)
+  |> (if !optimize_hoist_allocations && not !opt_no_rts then
+    recursive_functions |> check_vectors else nothing)
+  |>
+  (if !optimize_hoist_allocations && not !opt_no_rts then
+    check_vectors_in_clause else nothing)
+
 
 (**************************************************************************)
 (* 6. Code generation                                                     *)
@@ -1143,7 +1278,10 @@ let rec codegen_conversion l clexp cval =
       let i = ngensym () in
       let from = ngensym () in
       let into = ngensym () in
-      sail_kill ~prefix:"  " ~suffix:";" (sgen_ctyp_name ctyp_to) "%s" (sgen_clexp l clexp)
+
+      (ksprintf string "  if (!%s.optimized) {" (sgen_clexp_pure l clexp))
+      ^^ (sail_kill ~prefix:"  " ~suffix:";" (sgen_ctyp_name ctyp_to) "%s" (sgen_clexp l clexp))
+      ^^ string "}"
       ^^ hardline
       ^^ ksprintf string "  internal_vector_init_%s(%s, %s.len);" (sgen_ctyp_name ctyp_to) (sgen_clexp l clexp)
            (sgen_cval cval)
@@ -1726,26 +1864,42 @@ let codegen_list ctyp =
     ^^ twice hardline
   )
 
+
 (* Generate functions for working with non-bit vectors of some specific type. *)
 let codegen_vector ctyp =
   let open Printf in
   let id = mk_id (string_of_ctyp (CT_vector ctyp)) in
+  let opt = is_hoist_vec (CT_vector ctyp) in
   if IdSet.mem id !generated then empty
   else (
     let vector_typedef =
-      ksprintf string "struct %s {\n  size_t len;\n  %s *data;\n};\n" (sgen_id id) (sgen_ctyp ctyp)
+      ksprintf string "struct %s {\n  size_t len;\n  bool optimized;\n  %s *data;\n};\n" (sgen_id id) (sgen_ctyp ctyp)
       ^^ ksprintf string "typedef struct %s %s;" (sgen_id id) (sgen_id id)
     in
+    let isv = function CT_lint | CT_lbits -> true | _ -> false in
     let vector_decl =
       c_function ~return:"static void"
         (sail_create (sgen_id id) "%s *rop" (sgen_id id))
-        [c_stmt "rop->len = 0"; c_stmt "rop->data = NULL"]
+        [c_stmt "rop->len = 0"; c_stmt "rop->data = NULL"; c_stmt "rop->optimized = false"]
     in
+
     let vector_init =
       c_function ~return:"static void"
         (ksprintf string "vector_init_%s(%s *vec, sail_int n, %s elem)" (sgen_id id) (sgen_id id) (sgen_ctyp ctyp))
         [
-          sail_kill ~suffix:";" (sgen_id id) "vec";
+          ( if opt then
+              c_if
+                (string "(vec->len >= (size_t)sail_int_get_ui(n))")
+                [
+                  c_stmt "size_t m = (size_t)sail_int_get_ui(n)";
+                  c_stmt "vec->len = m";
+                  c_for (string "(size_t i = 0; i < m; i++)")
+                    ( if is_stack_ctyp ctyp then [c_stmt "(vec->data)[i] = elem"]
+                      else [sail_copy ~suffix:";" (sgen_ctyp_name ctyp) "(vec->data) + i, elem"]
+                    );
+                ]
+            else sail_kill ~suffix:";" (sgen_id id) "vec"
+          );
           c_stmt "size_t m = (size_t)sail_int_get_ui(n)";
           c_stmt "vec->len = m";
           ksprintf c_stmt "vec->data = sail_new_array(%s, m)" (sgen_ctyp ctyp);
@@ -1763,7 +1917,24 @@ let codegen_vector ctyp =
       c_function ~return:"static void"
         (sail_copy (sgen_id id) "%s *rop, %s op" (sgen_id id) (sgen_id id))
         [
-          sail_kill ~suffix:";" (sgen_id id) "rop";
+          ( if opt then
+            c_if
+              (string "(rop->len >= op.len)")
+              [
+                c_for (string "(size_t i = 0; i < op.len; i++)")
+                  ( if is_stack_ctyp ctyp then [c_stmt "(vec->data)[i] = elem"]
+                    else [sail_copy ~suffix:";" (sgen_ctyp_name ctyp) "(rop->data) + i, op.data[i]"]
+                  );
+                c_stmt "size_t delta = rop->len - op.len;";
+                c_for (string "(size_t i = 0; i < delta; i++)")
+                ( 
+                  [sail_kill ~suffix:";" (sgen_ctyp_name ctyp) "(rop->data) + op.len + i"]
+                );
+                c_stmt "rop->len = op.len;";
+                c_stmt "return";
+              ]
+          else sail_kill ~suffix:";" (sgen_id id) "rop";
+        );
           c_stmt "rop->len = op.len";
           ksprintf c_stmt "rop->data = sail_new_array(%s, rop->len)" (sgen_ctyp ctyp);
           c_for (string "(int i = 0; i < op.len; i++)")
@@ -1787,6 +1958,7 @@ let codegen_vector ctyp =
                  [sail_kill ~suffix:";" (sgen_ctyp_name ctyp) "(rop->data) + i"];
              ]
          )
+        @ [c_stmt "rop->len = 0;"]
         @ [c_stmt "if (rop->data != NULL) sail_free(rop->data)"]
         )
     in
@@ -1839,7 +2011,14 @@ let codegen_vector ctyp =
     let internal_vector_init =
       c_function ~return:"static void"
         (ksprintf string "internal_vector_init_%s(%s *rop, const int64_t len)" (sgen_id id) (sgen_id id))
-        ([c_stmt "rop->len = len"; ksprintf c_stmt "rop->data = sail_new_array(%s, len)" (sgen_ctyp ctyp)]
+        (( if isv ctyp then
+             [
+               c_stmt "if (rop->len > len) { rop->len = len; return ; }";
+               c_stmt "rop->len = len";
+               ksprintf c_stmt "rop->data = sail_new_array(%s, len)" (sgen_ctyp ctyp);
+             ]
+           else [c_stmt "rop->len = len"; ksprintf c_stmt "rop->data = sail_new_array(%s, len)" (sgen_ctyp ctyp)]
+         )
         @ c_cond_block
             (not (is_stack_ctyp ctyp))
             [
@@ -1904,6 +2083,7 @@ let codegen_vector ctyp =
       ^^ twice hardline
     end
   )
+
 
 let is_decl = function I_aux (I_decl _, _) -> true | _ -> false
 
@@ -1979,11 +2159,20 @@ let codegen_def' ctx (CDEF_aux (aux, _)) =
       ^^ hardline ^^ string "}"
   | CDEF_type ctype_def -> codegen_type_def ctype_def
   | CDEF_startup (id, instrs) ->
+      let open Printf in
       let startup_header = string (Printf.sprintf "%svoid startup_%s(void)" (static ()) (sgen_function_id id)) in
+      let extra = instrs |> List.fold_left 
+            (fun acc -> function 
+              | I_aux (I_decl (ct, name), _) when is_hoist_vec ct -> 
+                acc ^^ (ksprintf string "%s.optimized = true;" (sgen_name name) ^^ hardline) 
+              | _ -> acc
+              ) hardline 
+      in
       separate_map hardline codegen_decl instrs
       ^^ twice hardline ^^ startup_header ^^ hardline ^^ string "{"
       ^^ jump 0 2 (separate_map hardline codegen_alloc instrs)
-      ^^ hardline ^^ string "}"
+      ^^ hardline ^^ extra ^^ string "}"
+
   | CDEF_finish (id, instrs) ->
       let finish_header = string (Printf.sprintf "%svoid finish_%s(void)" (static ()) (sgen_function_id id)) in
       separate_map hardline codegen_decl (List.filter is_decl instrs)
