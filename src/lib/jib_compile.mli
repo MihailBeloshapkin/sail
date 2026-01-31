@@ -180,6 +180,8 @@ module Make (C : CONFIG) : sig
   val compile_def : int -> int -> ctx -> typed_def -> cdef list * ctx
 
   val compile_ast : ctx -> typed_ast -> cdef list * ctx
+
+  val print_cdef : x -> cdef -> unit
 end
 
 (** Adds some special functions to the environment that are used to

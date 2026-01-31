@@ -508,8 +508,15 @@ void trace_unit(const unit u) {
   if (g_trace_enabled) fputs("()", stderr);
 }
 
-void trace_sail_string(const_sail_string str) {
-  if (g_trace_enabled) fputs(str, stderr);
+void trace_sail_string(sail_string str) {
+  if (g_trace_enabled) {
+    if (str.type == 0) {
+      fputs(str.data.short_str, stderr);
+    }
+    else {
+      fputs(str.data.long_str, stderr);
+    }
+  }
 }
 
 void trace_sail_int(const sail_int op) {
@@ -517,7 +524,7 @@ void trace_sail_int(const sail_int op) {
 }
 
 void trace_lbits(const lbits op) {
-  if (g_trace_enabled) fprint_bits("", op, "", stderr);
+  if (g_trace_enabled) fprint_bits(string_of_lit(""), op, string_of_lit(""), stderr);
 }
 
 void trace_bool(const bool b) {

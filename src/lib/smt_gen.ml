@@ -1591,7 +1591,7 @@ module Make (Config : CONFIG) (Primop_gen : PRIMOP_GEN) = struct
     | "gt_real" -> binary_primop (binary_smt ">")
     | "lteq_real" -> binary_primop (binary_smt "<=")
     | "gteq_real" -> binary_primop (binary_smt ">=")
-    | "concat_str" ->
+    | "" ->
         binary_primop_simple (fun str1 str2 ->
             let* str1 = smt_cval str1 in
             let* str2 = smt_cval str2 in

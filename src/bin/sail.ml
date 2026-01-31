@@ -442,11 +442,13 @@ let run_sail (config : Yojson.Basic.t option) tgt =
     | [], [] ->
         (* If there are no provided project files, we concatenate all
            the free file arguments into one big blob like before *)
+           print_endline "run_sail: 1";
         Frontend.load_files ~target:tgt Locations.sail_dir !options Type_check.initial_env frees
     (* Allows project files from either free arguments via suffix, or
        from -project, but not both as the ordering between them would
        be unclear. *)
     | project_files, [] | [], project_files ->
+        print_endline "run_sail: 2";
         let t = Profile.start () in
         let defs =
           List.map

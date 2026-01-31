@@ -52,14 +52,19 @@ extern "C" {
 
 void sail_match_failure(const_sail_string msg)
 {
-  fprintf(stderr, "Pattern match failure in %s\n", msg);
+  fprintf(stderr, "Pattern match failure in %s\n", msg); 
   exit(EXIT_FAILURE);
 }
 
-unit sail_assert(bool b, const_sail_string msg)
+unit sail_assert(bool b, sail_string msg)
 {
   if (b) return UNIT;
-  fprintf(stderr, "Assertion failed: %s\n", msg);
+  if (msg.type == 0) {
+    fprintf(stderr, "Assertion failed: %s\n", msg.data.short_str);
+  }
+  else {
+    fprintf(stderr, "Assertion failed: %s\n", msg.data.long_str);
+  }
   exit(EXIT_FAILURE);
 }
 

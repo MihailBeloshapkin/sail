@@ -126,101 +126,215 @@ bool UNDEFINED(bool)(const unit u) {
   return false;
 }
 
-/* ***** Sail strings ***** */
 
-void CREATE(sail_string)(sail_string *str)
-{
-  char *istr = (char *) sail_malloc(1 * sizeof(char));
-  istr[0] = '\0';
-  *str = istr;
+/* ***** Sail optimized strings ***** */
+
+void CREATE(sail_string)(sail_string *str) {
+  str->len = 0;
+  str->type = 0; // static string
 }
 
 void RECREATE(sail_string)(sail_string *str)
 {
-  sail_free(*str);
-  char *istr = (char *) sail_malloc(1 * sizeof(char));
-  istr[0] = '\0';
-  *str = istr;
+	if (str->type == 1) {
+		sail_free(str->data.long_str);
+	}
+	str->len = 0;
+	str->type = 0; // static string
 }
 
-void COPY(sail_string)(sail_string *str1, const_sail_string str2)
+sail_string string_of_lit(const char *src) 
 {
-  size_t len = strlen(str2);
-  *str1 = (sail_string)realloc(*str1, len + 1);
-  *str1 = strcpy(*str1, str2);
+    sail_string sstr;
+    
+    if (src == NULL) {
+        sstr.len = 0;
+        sstr.type = 0;
+        sstr.data.short_str[0] = '\0';
+        return sstr;
+    }
+    
+    sstr.len = strlen(src);
+    
+    if (sstr.len < STR_BUF - 1) {
+        sstr.type = 0;
+        strncpy(sstr.data.short_str, src, STR_BUF - 1);
+        sstr.data.short_str[sstr.len] = '\0';
+    } else {
+        sstr.type = 1;
+        sstr.data.long_str = (char*)malloc(sstr.len + 1); // +1 для '\0'
+        if (sstr.data.long_str == NULL) {
+            sstr.type = 0;
+            strncpy(sstr.data.short_str, "[ERROR]", STR_BUF - 1);
+            sstr.data.short_str[STR_BUF - 1] = '\0';
+            sstr.len = 7;
+            return sstr;
+        }
+        strcpy(sstr.data.long_str, src);
+    }
+    
+    return sstr;
+}
+
+const char* sail_string_get_cstr(const sail_string* s) {
+    if (s == NULL) return NULL;
+
+    if (s->type == 0) {
+        return s->data.short_str;
+    } else {
+        return s->data.long_str;
+    }
+}
+
+
+void string_of_sail_string(char *out, sail_string str) {
+
+}
+
+void COPY(sail_string)(sail_string *str1, sail_string str2)
+{
+  if (str1->type == 1) {
+	  sail_free(str1->data.long_str);
+  }
+  if (str2.len < STR_BUF) {
+	  if (str2.type == 0) {
+	    memcpy(str1->data.short_str, str2.data.short_str, strlen(str2.data.short_str) + 1);
+	  }
+	  else {
+	    memcpy(str1->data.short_str, str2.data.long_str, strlen(str2.data.long_str) + 1);
+	  }
+	  str1->type = 0;
+	  str1->len = str2.len;
+  }
+  else {
+	  // sail_free(str1->data.long_str);
+	  str1->data.long_str = sail_malloc(strlen(str2.data.long_str) + 1);
+	  memcpy(str1->data.long_str, str2.data.long_str, strlen(str2.data.long_str) + 1);
+          str1->type = 1;
+          str1->len = str2.len;
+  }
 }
 
 void KILL(sail_string)(sail_string *str)
 {
-  sail_free(*str);
+  str->len = 0;
+  if (str->type == 1) {
+    sail_free(str->data.long_str);
+  }
 }
+
+
 
 void dec_str(sail_string *str, const mpz_t n)
 {
-  sail_free(*str);
-  gmp_asprintf(str, "%Zd", n);
+  if (str->type == 1) {
+  	sail_free(str->data.long_str);
+  }
+  gmp_asprintf(&(str->data.long_str), "%Zd", n);
+  str->type = 1;
+  str->len = strlen(str->data.long_str);
 }
 
 void hex_str(sail_string *str, const mpz_t n)
 {
-  sail_free(*str);
-
+  if (str->type == 1) {
+    sail_free(str->data.long_str);
+  }
   if (mpz_cmp_si(n, 0) < 0) {
     mpz_t abs;
     mpz_init(abs);
     mpz_abs(abs, n);
-    gmp_asprintf(str, "-0x%Zx", abs);
+    gmp_asprintf(&(str->data.long_str), "-0x%Zx", abs);
   } else {
-    gmp_asprintf(str, "0x%Zx", n);
+    gmp_asprintf(&(str->data.long_str), "0x%Zx", n);
   }
+  str->type = 1;
+  str->len = strlen(str->data.long_str);
 }
 
 void hex_str_upper(sail_string *str, const mpz_t n)
 {
-  sail_free(*str);
+  sail_free(str->data.long_str);
 
   if (mpz_cmp_si(n, 0) < 0) {
     mpz_t abs;
     mpz_init(abs);
     mpz_abs(abs, n);
-    gmp_asprintf(str, "-0x%ZX", abs);
+    gmp_asprintf(&(str->data.long_str), "-0x%ZX", abs);
   } else {
-    gmp_asprintf(str, "0x%ZX", n);
+    gmp_asprintf(&(str->data.long_str), "0x%ZX", n);
   }
 }
 
-bool eq_string(const_sail_string str1, const_sail_string str2)
+bool eq_string(sail_string str1, sail_string str2)
 {
-  return strcmp(str1, str2) == 0;
+  return strcmp(str1.data.long_str, str2.data.long_str) == 0;
 }
 
-bool EQUAL(sail_string)(const_sail_string str1, const_sail_string str2)
+bool EQUAL(sail_string)(sail_string str1, sail_string str2)
 {
-  return strcmp(str1, str2) == 0;
+  return strcmp(str1.data.long_str, str2.data.long_str) == 0;
 }
 
 void undefined_string(sail_string *str, const unit u) {}
 
-void concat_str(sail_string *stro, const_sail_string str1, const_sail_string str2)
+void concat_str(sail_string *stro, sail_string str1, sail_string str2)
 {
-  *stro = (sail_string)realloc(*stro, strlen(str1) + strlen(str2) + 1);
-  (*stro)[0] = '\0';
-  strcat(*stro, str1);
-  strcat(*stro, str2);
+  if (stro->type == 1) {
+    sail_free(stro->data.long_str);
+  }
+  stro->len = str1.len + str2.len;
+  if (str1.len + str2.len < STR_BUF) {
+    stro->data.short_str[0] = '\0';
+    if (str1.type == 0) {
+      strcat(stro->data.short_str, str1.data.short_str);
+    } else {
+      strcat(stro->data.short_str, str1.data.long_str);
+    }
+    if (str2.type == 0) {
+      strcat(stro->data.short_str, str2.data.short_str);
+    } else {
+      strcat(stro->data.short_str, str2.data.long_str);
+    }
+    //stro->len = str1.len + str2.len;
+    stro->type = 0;
+    return;
+  }
+  stro->data.long_str = sail_malloc((str1.len + str2.len + 1) * sizeof(char));
+  stro->data.long_str[0] = '\0';
+  stro->type = 1;
+  if (str1.type == 0) {
+    strcat(stro->data.long_str, str1.data.short_str);
+  }
+  else {
+    strcat(stro->data.long_str, str1.data.long_str);
+  }
+  if (str2.type == 0) {
+    strcat(stro->data.long_str, str2.data.short_str);
+  }
+  else {
+    strcat(stro->data.long_str, str2.data.long_str);
+  }
 }
 
-bool string_startswith(const_sail_string s, const_sail_string prefix)
+bool string_startswith(sail_string s, sail_string prefix)
 {
-  return strstr(s, prefix) == s;
+  return true;
 }
 
-void string_length(sail_int *len, const_sail_string s)
+void string_length(sail_int *len, sail_string s)
 {
-  mpz_set_ui(*len, strlen(s));
+  if (s.type == 0) {
+    mpz_set_ui(*len, strlen(s.data.short_str));
+  }
+  else {
+    mpz_set_ui(*len, strlen(s.data.long_str));
+  }
 }
 
-void string_drop(sail_string *dst, const_sail_string s, sail_int ns)
+void string_drop(sail_string *dst, sail_string s, sail_int ns)
 {
+  /* REWRITE
   size_t len = strlen(s);
   mach_int n = CREATE_OF(mach_int, sail_int)(ns);
   if (len >= n) {
@@ -231,10 +345,12 @@ void string_drop(sail_string *dst, const_sail_string s, sail_int ns)
     *dst = (sail_string)realloc(*dst, 1);
     **dst = '\0';
   }
+    */
 }
 
-void string_take(sail_string *dst, const_sail_string s, sail_int ns)
+void string_take(sail_string *dst, sail_string s, sail_int ns)
 {
+  /* REWRITE
   size_t len = strlen(s);
   mach_int n = CREATE_OF(mach_int, sail_int)(ns);
   mach_int to_copy;
@@ -246,6 +362,7 @@ void string_take(sail_string *dst, const_sail_string s, sail_int ns)
   *dst = (sail_string)realloc(*dst, to_copy + 1);
   memcpy(*dst, s, to_copy);
   (*dst)[to_copy] = '\0';
+  */
 }
 
 /* ***** Sail integers ***** */
@@ -297,19 +414,34 @@ void RECREATE_OF(sail_int, mach_int)(sail_int *rop, mach_int op)
   mpz_set_si(*rop, op);
 }
 
-void CREATE_OF(sail_int, sail_string)(sail_int *rop, const_sail_string str)
+void CREATE_OF(sail_int, sail_string)(sail_int *rop, sail_string str)
 {
-  mpz_init_set_str(*rop, str, 10);
+  if (str.type == 0) {
+    mpz_init_set_str(*rop, str.data.short_str, 10);
+  }
+  else {
+    mpz_init_set_str(*rop, str.data.long_str, 10);
+  }
 }
 
-void CONVERT_OF(sail_int, sail_string)(sail_int *rop, const_sail_string str)
+void CONVERT_OF(sail_int, sail_string)(sail_int *rop, sail_string str)
 {
-  mpz_set_str(*rop, str, 10);
+  if (str.type == 0) {
+    mpz_set_str(*rop, str.data.short_str, 10);
+  }
+  else {
+    mpz_set_str(*rop, str.data.long_str, 10);
+  }
 }
 
-void RECREATE_OF(sail_int, sail_string)(mpz_t *rop, const_sail_string str)
+void RECREATE_OF(sail_int, sail_string)(mpz_t *rop, sail_string str)
 {
-  mpz_set_str(*rop, str, 10);
+  if (str.type == 0) {
+    mpz_set_str(*rop, str.data.short_str, 10);
+  }
+  else {
+    mpz_set_str(*rop, str.data.long_str, 10);
+  }
 }
 
 mach_int CONVERT_OF(mach_int, sail_int)(const sail_int op)
@@ -490,6 +622,19 @@ void pow2(sail_int *rop, const sail_int exp)
   mpz_init_set_ui(base, 2ul);
   mpz_pow_ui(*rop, base, exp_ui);
   mpz_clear(base);
+}
+
+unsigned powi(unsigned exp) {
+    unsigned result = 1;
+    unsigned base = 2;
+    while (exp)
+    {
+        if (exp % 2)
+           result *= base;
+        exp /= 2;
+        base *= base;
+    }
+    return result;
 }
 
 #endif
@@ -752,9 +897,12 @@ void zero_extend(lbits *rop, const lbits op, const sail_int len)
   mpz_set(*rop->bits, *op.bits);
 }
 
-fbits fast_zero_extend(const sbits op, const uint64_t n)
+sbits fast_zero_extend(const sbits op, const uint64_t n)
 {
-  return op.bits;
+  sbits res;
+  res.len = n;
+  res.bits = op.bits;
+  return res;
 }
 
 void sign_extend(lbits *rop, const lbits op, const sail_int len)
@@ -883,6 +1031,13 @@ void sail_truncate(lbits *rop, const lbits op, const sail_int len)
   mpz_set(*rop->bits, *op.bits);
   normalize_lbits(rop);
 }
+
+fbits fast_sail_truncate(fbits op, int64_t len)
+{
+  assert(64 >= len);
+  return op & safe_rshift(UINT64_MAX, 64 - len);
+}
+
 
 void sail_truncateLSB(lbits *rop, const lbits op, const sail_int len)
 {
@@ -1550,13 +1705,18 @@ void real_power(real *rop, const real base, const sail_int exp)
   mpq_clear(b);
 }
 
-void CREATE_OF(real, sail_string)(real *rop, const_sail_string op)
+void CREATE_OF(real, sail_string)(real *rop, sail_string op)
 {
   int decimal;
   int total;
 
   mpq_init(*rop);
-  gmp_sscanf(op, "%Zd.%n%Zd%n", sail_lib_tmp1, &decimal, sail_lib_tmp2, &total);
+  if (op.type == 0) {
+    gmp_sscanf(op.data.short_str, "%Zd.%n%Zd%n", sail_lib_tmp1, &decimal, sail_lib_tmp2, &total);
+  }
+  else {
+    gmp_sscanf(op.data.long_str, "%Zd.%n%Zd%n", sail_lib_tmp1, &decimal, sail_lib_tmp2, &total);
+  }
 
   int len = total - decimal;
   mpz_ui_pow_ui(sail_lib_tmp3, 10, len);
@@ -1568,12 +1728,17 @@ void CREATE_OF(real, sail_string)(real *rop, const_sail_string op)
   mpq_add(*rop, *rop, sail_lib_tmp_real);
 }
 
-void CONVERT_OF(real, sail_string)(real *rop, const_sail_string op)
+void CONVERT_OF(real, sail_string)(real *rop, sail_string op)
 {
   int decimal;
   int total;
 
-  gmp_sscanf(op, "%Zd.%n%Zd%n", sail_lib_tmp1, &decimal, sail_lib_tmp2, &total);
+  if (op.type == 0) {
+    gmp_sscanf(op.data.short_str, "%Zd.%n%Zd%n", sail_lib_tmp1, &decimal, sail_lib_tmp2, &total);
+  }
+  else {
+    gmp_sscanf(op.data.long_str, "%Zd.%n%Zd%n", sail_lib_tmp1, &decimal, sail_lib_tmp2, &total);
+  }
 
   int len = total - decimal;
   mpz_ui_pow_ui(sail_lib_tmp3, 10, len);
@@ -1585,15 +1750,25 @@ void CONVERT_OF(real, sail_string)(real *rop, const_sail_string op)
   mpq_add(*rop, *rop, sail_lib_tmp_real);
 }
 
-unit print_real(const_sail_string str, const real op)
+unit print_real(sail_string str, const real op)
 {
-  gmp_printf("%s%Qd\n", str, op);
+  if (str.type == 0) {
+    gmp_printf("%s%Qd\n", str.data.short_str, op);
+  }
+  else {
+    gmp_printf("%s%Qd\n", str.data.long_str, op);
+  }
   return UNIT;
 }
 
-unit prerr_real(const_sail_string str, const real op)
+unit prerr_real(sail_string str, const real op)
 {
-  gmp_fprintf(stderr, "%s%Qd\n", str, op);
+  if (str.type == 0) {
+    gmp_fprintf(stderr, "%s%Qd\n", str.data.short_str, op);
+  }
+  else {
+    gmp_fprintf(stderr, "%s%Qd\n", str.data.long_str, op);
+  }
   return UNIT;
 }
 
@@ -1612,15 +1787,20 @@ void random_real(real *rop, const unit u)
 
 void string_of_int(sail_string *str, const sail_int i)
 {
-  sail_free(*str);
-  gmp_asprintf(str, "%Zd", i);
+  sail_free(str->data.long_str);
+  str->type = 1; // dynamic
+
+  gmp_asprintf(&(str->data.long_str), "%Zd", i);
+  str->len = strlen(str->data.long_str);
 }
 
 /* asprintf is a GNU extension, but it should exist on BSD */
 void string_of_fbits(sail_string *str, const fbits op)
 {
-  sail_free(*str);
-  int bytes = asprintf(str, "0x%" PRIx64, op);
+  //sail_free(*str);
+  int bytes = asprintf(&(str->data.long_str), "0x%" PRIx64, op);
+  str->type = 1;
+  str->len = strlen(str->data.long_str);
   if (bytes == -1) {
     fprintf(stderr, "Could not print bits 0x%" PRIx64 "\n", op);
   }
@@ -1628,24 +1808,30 @@ void string_of_fbits(sail_string *str, const fbits op)
 
 void string_of_lbits(sail_string *str, const lbits op)
 {
-  sail_free(*str);
+  if (str->type == 1) {
+    sail_free(str->data.long_str);
+  }
+  str->type = 1;
   if ((op.len % 4) == 0) {
-    gmp_asprintf(str, "0x%*0ZX", op.len / 4, *op.bits);
+    gmp_asprintf(&(str->data.long_str), "0x%*0ZX", op.len / 4, *op.bits);
+    str->len = strlen(str->data.long_str);
   } else {
-    *str = (char *) sail_malloc((op.len + 3) * sizeof(char));
-    (*str)[0] = '0';
-    (*str)[1] = 'b';
+    str->data.long_str = (char *) sail_malloc((op.len + 3) * sizeof(char));
+    str->data.long_str[0] = '0';
+    str->data.long_str[1] = 'b';
     for (int i = 1; i <= op.len; ++i) {
-      (*str)[i + 1] = mpz_tstbit(*op.bits, op.len - i) + 0x30;
+      str->data.long_str[i + 1] = mpz_tstbit(*op.bits, op.len - i) + 0x30;
     }
-    (*str)[op.len + 2] = '\0';
+    str->data.long_str[op.len + 2] = '\0';
   }
 }
 
 void decimal_string_of_fbits(sail_string *str, const fbits op)
 {
-  sail_free(*str);
-  int bytes = asprintf(str, "%" PRId64, op);
+  sail_free(str->data.long_str);
+  int bytes = asprintf(&(str->data.long_str), "%" PRId64, op);
+  str->type = 1;
+  str->len = strlen(str->data.long_str);
   if (bytes == -1) {
     fprintf(stderr, "Could not print bits %" PRId64 "\n", op);
   }
@@ -1653,12 +1839,15 @@ void decimal_string_of_fbits(sail_string *str, const fbits op)
 
 void decimal_string_of_lbits(sail_string *str, const lbits op)
 {
-  sail_free(*str);
-  gmp_asprintf(str, "%Z", *op.bits);
+  //sail_free(str->data.short_str);
+  gmp_asprintf(&(str->data.long_str), "%Z", *op.bits);
+  str->len = strlen(str->data.long_str);
+  str->type = 1;
 }
 
-void parse_hex_bits(lbits *res, const mpz_t n, const_sail_string hex)
+void parse_hex_bits(lbits *res, const mpz_t n, sail_string hex)
 {
+  /*
   if (!valid_hex_bits(n, hex)) {
     goto failure;
   }
@@ -1677,10 +1866,12 @@ void parse_hex_bits(lbits *res, const mpz_t n, const_sail_string hex)
 failure:
   res->len = mpz_get_ui(n);
   mpz_set_ui(*res->bits, 0);
+  */
 }
 
-bool valid_hex_bits(const mpz_t n, const_sail_string hex) {
+bool valid_hex_bits(const mpz_t n, sail_string hex) {
   // The string must be prefixed by '0x'
+  /*
   if (strncmp(hex, "0x", 2) != 0) {
     return false;
   }
@@ -1727,17 +1918,23 @@ bool valid_hex_bits(const mpz_t n, const_sail_string hex) {
       return false;
     }
   }
-
+  */
   return true;
 }
 
-void fprint_bits(const_sail_string pre,
+void fprint_bits(sail_string pre,
 		 const lbits op,
-		 const_sail_string post,
+		 sail_string post,
 		 FILE *stream)
 {
-  fputs(pre, stream);
-
+  
+  if (pre.type == 0) {
+    fputs(pre.data.short_str, stream);
+  } 
+  else {
+    fputs(pre.data.long_str, stream);
+  }
+  
   if (op.len % 4 == 0) {
     fputs("0x", stream);
     mpz_t buf;
@@ -1763,57 +1960,93 @@ void fprint_bits(const_sail_string pre,
       fputc(mpz_tstbit(*op.bits, i - 1) + 0x30, stream);
     }
   }
-
-  fputs(post, stream);
+  
+  if (post.type == 0){
+    fputs(post.data.short_str, stream);
+  }
+  else {
+    fputs(post.data.long_str, stream);
+  }
+  
 }
 
-unit print_bits(const_sail_string str, const lbits op)
+unit print_bits(sail_string str, const lbits op)
 {
-  fprint_bits(str, op, "\n", stdout);
+  fprint_bits(str, op, string_of_lit("\n"), stdout);
   return UNIT;
 }
 
-unit prerr_bits(const_sail_string str, const lbits op)
+unit prerr_bits(sail_string str, const lbits op)
 {
-  fprint_bits(str, op, "\n", stderr);
+  fprint_bits(str, op, string_of_lit("\n"), stderr);
   return UNIT;
 }
 
-unit print(const_sail_string str)
+unit print(sail_string str)
 {
-  printf("%s", str);
+  if (str.type == 0) {
+    printf("%s", str.data.short_str);
+  }
+  else {
+    printf("%s", str.data.long_str);
+  }
   return UNIT;
 }
 
-unit print_endline(const_sail_string str)
+unit print_endline(sail_string str)
 {
-  printf("%s\n", str);
+  if (str.type == 0) {
+    printf("%s\n", str.data.short_str);
+  }
+  else {
+    printf("%s\n", str.data.long_str);
+  }
   return UNIT;
 }
 
-unit prerr(const_sail_string str)
+unit prerr(sail_string str)
 {
-  fprintf(stderr, "%s", str);
+  if (str.type == 0) {
+    fprintf(stderr, "%s", str.data.short_str);
+  }
+  else {
+    fprintf(stderr, "%s", str.data.long_str);
+  }
   return UNIT;
 }
 
-unit prerr_endline(const_sail_string str)
+unit prerr_endline(sail_string str)
 {
-  fprintf(stderr, "%s\n", str);
+  if (str.type == 0) {
+    fprintf(stderr, "%s\n", str.data.short_str);
+  }
+  else {
+    fprintf(stderr, "%s\n", str.data.long_str);
+  }
   return UNIT;
 }
 
-unit print_int(const_sail_string str, const sail_int op)
+unit print_int(sail_string str, const sail_int op)
 {
-  fputs(str, stdout);
+  if (str.type == 0) {
+    fputs(str.data.short_str, stdout);
+  }
+  else {
+    fputs(str.data.long_str, stdout);
+  }
   mpz_out_str(stdout, 10, op);
   putchar('\n');
   return UNIT;
 }
 
-unit prerr_int(const_sail_string str, const sail_int op)
+unit prerr_int(sail_string str, const sail_int op)
 {
-  fputs(str, stderr);
+  if (str.type == 0) {
+    fputs(str.data.short_str, stderr);
+  }
+  else {
+    fputs(str.data.long_str, stderr);
+  }
   mpz_out_str(stderr, 10, op);
   fputs("\n", stderr);
   return UNIT;

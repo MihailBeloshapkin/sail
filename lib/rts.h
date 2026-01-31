@@ -195,7 +195,7 @@ bool is_tracing(const unit);
 void trace_sail_int(const sail_int);
 void trace_bool(const bool);
 void trace_unit(const unit);
-void trace_sail_string(const_sail_string);
+void trace_sail_string(sail_string);
 void trace_fbits(const fbits);
 void trace_lbits(const lbits);
 
@@ -235,7 +235,7 @@ int process_arguments(int, char**);
 void setup_rts(void);
 void cleanup_rts(void);
 
-unit z__SetConfig(const_sail_string, sail_int);
+unit z__SetConfig(sail_string, sail_int);
 unit z__ListConfig(const unit u);
 
 #ifdef __cplusplus
