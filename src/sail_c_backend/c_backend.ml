@@ -116,6 +116,7 @@ let rec is_stack_ctyp ctyp =
   | CT_lbits -> false
   | CT_real | CT_string | CT_list _ | CT_vector _ | CT_fvector _ -> false
   | CT_struct (_, fields) -> List.for_all (fun (_, ctyp) -> is_stack_ctyp ctyp) fields
+  | CT_sstring -> false
   | CT_variant (_, _) ->
       false
       (* List.for_all (fun (_, ctyp) -> is_stack_ctyp ctyp) ctors *)
@@ -185,6 +186,7 @@ let rec sgen_ctyp_name = function
   | CT_vector _ as v -> Util.zencode_string (string_of_ctyp v)
   | CT_fvector (_, typ) -> sgen_ctyp_name (CT_vector typ)
   | CT_string -> "sail_string"
+  | CT_sstring -> "sail_sstring"
   | CT_real -> "real"
   | CT_ref ctyp -> "ref_" ^ sgen_ctyp_name ctyp
   | CT_float n -> "float" ^ string_of_int n
@@ -689,7 +691,7 @@ let add_local_labels instrs =
 (* 5. Optimizations                                                       *)
 (**************************************************************************)
 
-let hoist_ctyp = function CT_lint | CT_lbits | CT_struct _ -> true | _ -> false
+let hoist_ctyp = function CT_lint | CT_lbits | CT_struct _  -> true | _ -> false
 
 let hoist_counter = ref 0
 let hoist_id () =
@@ -697,6 +699,8 @@ let hoist_id () =
   incr hoist_counter;
   name id
 
+
+  
 let hoist_allocations recursive_functions = function
   | CDEF_aux (CDEF_fundef (function_id, _, _, _), _) as cdef when IdSet.mem function_id recursive_functions -> [cdef]
   | CDEF_aux (CDEF_fundef (function_id, heap_return, args, body), def_annot) ->
@@ -734,12 +738,629 @@ let hoist_allocations recursive_functions = function
   | cdef -> [cdef]
 
 
+module Substs = Map.Make (String)
+
+module VarInclusions = Map.Make (Id)
+
+
+(** Функция производит проверку вхождения строки str в функции *)
+let check_str_inclusions str body =
+  let rec check_inc s = function
+    | V_id ((Name (i, _)), _) :: _ when Id.compare i s = 0 -> true
+    | [] -> false
+    | _ :: tail -> check_inc s tail
+  in
+  
+  let rec sub = function
+    | I_aux ((I_funcall (_, _, (id, _), cvl)), iann) :: tail ->
+      let used = check_inc str cvl in
+      if used then id :: sub tail else sub tail
+    | I_aux (I_block block, annot) :: instrs -> (sub block) @ (sub instrs)
+    | I_aux (I_if (cval, then_instrs, else_instrs, ctyp), annot) :: instrs ->
+        (sub then_instrs) @ (sub else_instrs) @ (sub instrs)
+    | I_aux (I_try_block block, annot) :: instrs -> (sub block) @ sub instrs
+    | h :: t -> sub t
+    | [] -> [] 
+  in
+  sub body
+
+
+let try_optimize_func = ()
+
+(** Обход тела функции и оптимизация строк
+    Замена CT_string -> CT_sstring
+*)
+module StrOpt = struct
+  
+  let flexp (Name (did, _)) t = function 
+    | CL_id ((Name (n, _) as varname), _) when Id.compare did n = 0 -> 
+      Printf.printf "var found %s" (string_of_id n);
+      CL_id (varname, t)
+    | _ as cv -> 
+      print_endline "continue...";
+      cv
+
+  let fcval (Name (did, _)) t = function 
+    | V_id ((Name (n, _) as varname), _) when Id.compare did n = 0 -> 
+      print_endline "var found";
+      V_id (varname, t)
+    | _ as cv -> 
+      print_endline "continue...";
+      cv
+  
+  let finstr (Name (name, _)) t = function 
+    | I_aux (I_decl (_, (Name (n, _) as varname)), ann) when Id.compare name n = 0 -> I_aux (I_decl (t, varname), ann)
+    | I_aux (I_init (ct, (Name (n, _) as varname), cv), ann) when Id.compare name n = 0 -> I_aux (I_init (t, varname, cv), ann)
+    | I_aux (I_clear (ct, (Name (n, _) as varname)), ann) when Id.compare name n = 0 -> I_aux (I_clear (t, varname), ann)
+    | I_aux (I_reset (ct, (Name (n, _) as varname)), ann) when Id.compare name n = 0 -> I_aux (I_reset (t, varname), ann)
+    | I_aux (I_reinit (ct, (Name (n, _) as varname), cv), ann) when Id.compare name n = 0 -> I_aux (I_reinit (t, varname, cv), ann)
+    | _ as inst -> inst
+
+  let sgen_func_uid uid =
+    let str = zencode_uid uid in
+    !opt_prefix ^ String.sub str 1 (String.length str - 1)
+
+  let get_fname ctx (I_funcall (ret, special_extern, (id, ctyplist), args)) = 
+    if special_extern then string_of_id id
+    else if ctx_is_extern id ctx then ctx_get_extern id ctx
+    else sgen_func_uid (id, ctyplist)
+
+
+  let ch_return_operator heap_return ilist =
+    let rec loop ret = function
+      | I_aux (I_copy (CL_addr (CL_id (Name (curr_ret, _), _)), cv), iann) :: tail when Id.compare curr_ret ret = 0 -> 
+        Printf.printf "Return found\n";
+        I_aux (I_return (cv), iann) :: loop ret tail
+      | I_aux (I_block block, annot) :: instrs -> I_aux (I_block (loop ret block), annot) :: loop ret instrs
+      | I_aux (I_if (cval, then_instrs, else_instrs, ctyp), annot) :: instrs ->
+        I_aux (I_if (cval, (loop ret then_instrs), (loop ret else_instrs), ctyp), annot) :: loop ret instrs
+      | I_aux (I_try_block block, annot) :: instrs -> (loop ret block) @ loop ret instrs
+      | h :: t -> h :: loop ret t
+      | [] -> [] 
+  in
+  match heap_return with
+  | Some r -> 
+    Printf.printf "Heap return!!! %s\n" (string_of_id r);
+    loop r ilist
+  | None -> ilist
+  
+  let str_funcs =
+    Substs.empty 
+    |> Substs.add ("concat_str") (fun ret args -> I_funcall ((CR_one (CL_id (ret, CT_string))), false, ((mk_id "concat_sstr"), [(CT_string); (CT_string)]), args))
+    
+
+  let ch_str_funcs funcs ctx str_id body =
+    let rec sub = function  
+    | I_aux ((I_funcall ((CR_one (CL_id (r, _))), special_extern, (id, ctyplist), args) as fc), iann) :: tail -> 
+      print_endline "====";
+      let fname =
+        if special_extern then string_of_id id
+        else if ctx_is_extern id ctx then ctx_get_extern id ctx
+        else sgen_func_uid (id, ctyplist)
+      in
+
+      print_endline ("Func: " ^ (string_of_id id) ^ " --> " ^ fname);
+      let s = Substs.find_opt fname funcs in
+      
+      let new_exp  = (match s with
+        | Some f -> print_endline "Found"; f r args
+        | _ -> print_endline "Not Found"; fc) 
+      in
+
+      I_aux (new_exp, iann) :: sub tail
+    | I_aux ((I_funcall ((CR_one (CL_addr (CL_id (n, ct)))), special_extern, (id, ctyplist), args) as fc), iann) :: tail -> 
+      print_endline "This!!!";
+      I_aux ((I_funcall ((CR_one (CL_addr (CL_id (n, ct)))), special_extern, (id, ctyplist), args)), iann) :: sub tail
+    | I_aux (I_block block, annot) :: instrs -> I_aux (I_block (sub block), annot) :: sub instrs
+    | I_aux (I_if (cval, then_instrs, else_instrs, ctyp), annot) :: instrs ->
+        I_aux (I_if (cval, sub then_instrs, sub else_instrs, ctyp), annot) :: sub instrs
+    | I_aux (I_try_block block, annot) :: instrs -> I_aux (I_try_block (sub block), annot) :: sub instrs
+    | h :: t -> h :: sub t
+    | [] -> []
+    in
+  sub body
+
+  let optimize_str_function old_id ctx (CDEF_fundef (function_id, heap_return, args, body)) =
+    let rec get_str_decls = function
+      | I_aux (I_decl (CT_string, (Name (i, r) as decl_id)), annot) :: instrs -> 
+        i :: get_str_decls instrs
+      | I_aux (I_block block, annot) :: instrs -> get_str_decls block @ get_str_decls instrs
+      | I_aux (I_if (cval, then_instrs, else_instrs, ctyp), annot) :: instrs ->
+        get_str_decls then_instrs @ get_str_decls else_instrs @ get_str_decls instrs
+      | I_aux (I_try_block block, annot) :: instrs -> (get_str_decls block) @ get_str_decls instrs
+      | h :: t -> get_str_decls t
+      | [] -> []
+    in
+
+    let rec ch_args vl instrlist = 
+      match vl with
+      | (arg, CT_string) :: other -> 
+        let new_il = instrs_ch_type (flexp (Name (arg, 0)) (CT_sstring)) 
+          (fcval (Name (arg, 0)) (CT_sstring)) 
+          (finstr (Name (arg, 0)) (CT_sstring))
+          instrlist in
+        ch_args other new_il
+      | head :: tail -> ch_args tail instrlist
+      | []  -> instrlist  
+    in
+  
+    (** Функция определяет, можно ли оптимизировать данную строку *)
+    let rec optimization_criteria id opt_functions = function
+      | _ -> true 
+      | h :: t when string_of_id h = "a" -> false
+      | h :: t -> optimization_criteria id opt_functions t
+      | [] -> true 
+    in  
+  
+    let try_subst_str id body = 
+      let data = check_str_inclusions id body in
+      if optimization_criteria id [] data then
+        let _ = Printf.printf "optimization criteria true" in
+        instrs_ch_type (flexp (Name (id, 0)) (CT_sstring)) 
+          (fcval (Name (id, 0)) (CT_sstring)) (finstr (Name (id, 0)) (CT_sstring)) body
+      else body
+    in
+
+    let rec loop body = function 
+      | h :: t -> 
+        let new_body = body |> try_subst_str h in loop new_body t
+      | [] -> body
+    in
+
+    let _, arg_ctyps, ret_ctyp, _ =
+      match Bindings.find_opt old_id ctx.valspecs with
+      | Some vs -> vs
+      | None -> c_error ~loc:(id_loc old_id) ("Error: no valspec found for " ^ string_of_id function_id)
+    in  
+    let string_arg = List.fold_left2 (fun acc arg t-> match t with 
+          | CT_string -> (arg, t) :: acc  
+          | _ -> acc ) [] args arg_ctyps 
+    in
+    let new_arg_ctyps = arg_ctyps |> List.map (function | CT_string -> CT_sstring | t -> t) in
+    let new_ret_ctyp = match ret_ctyp with
+      | CT_string -> CT_sstring
+      | t -> t
+    in
+    let decls = get_str_decls body in
+    Printf.printf "Decls num %i" (List.length decls);
+    let new_body = loop body decls 
+      |> ch_args string_arg
+      |> ch_return_operator heap_return
+    in
+    CDEF_fundef (function_id, None, args, new_body), new_arg_ctyps, new_ret_ctyp
+
+
+  let optimize_ast ctx (CDEF_fundef (function_id, heap_return, args, body)) = 
+    (* алгоритм -- ищем I_decl для str *)
+    ()
+
+end
+
+(*
+let optimize_strs old_id ctx (CDEF_fundef (function_id, heap_return, args, body)) =
+  let flexp (Name (did, _)) t = function 
+    | CL_id ((Name (n, _) as varname), _) when Id.compare did n = 0 -> 
+      Printf.printf "var found %s" (string_of_id n);
+      CL_id (varname, t)
+    | _ as cv -> 
+      print_endline "continue...";
+      cv
+  in
+
+  let fcval (Name (did, _)) t = function 
+    | V_id ((Name (n, _) as varname), _) when Id.compare did n = 0 -> 
+      print_endline "var found";
+      V_id (varname, t)
+    | _ as cv -> 
+      print_endline "continue...";
+      cv
+  in
+  
+  let finstr (Name (name, _)) t = function 
+    | I_aux (I_decl (_, (Name (n, _) as varname)), ann) when Id.compare name n = 0 -> I_aux (I_decl (t, varname), ann)
+    | I_aux (I_init (ct, (Name (n, _) as varname), cv), ann) when Id.compare name n = 0 -> I_aux (I_init (t, varname, cv), ann)
+    | I_aux (I_clear (ct, (Name (n, _) as varname)), ann) when Id.compare name n = 0 -> I_aux (I_clear (t, varname), ann)
+    | I_aux (I_reset (ct, (Name (n, _) as varname)), ann) when Id.compare name n = 0 -> I_aux (I_reset (t, varname), ann)
+    | I_aux (I_reinit (ct, (Name (n, _) as varname), cv), ann) when Id.compare name n = 0 -> I_aux (I_reinit (t, varname, cv), ann)
+    | _ as inst -> inst
+  in
+
+  let rec get_str_decls = function
+    | I_aux (I_decl (CT_string, (Name (i, r) as decl_id)), annot) :: instrs -> 
+      i :: get_str_decls instrs
+    | I_aux (I_block block, annot) :: instrs -> get_str_decls block @ get_str_decls instrs
+    | I_aux (I_if (cval, then_instrs, else_instrs, ctyp), annot) :: instrs ->
+      get_str_decls then_instrs @ get_str_decls else_instrs @ get_str_decls instrs
+    | I_aux (I_try_block block, annot) :: instrs -> (get_str_decls block) @ get_str_decls instrs
+    | h :: t -> get_str_decls t
+    | [] -> []
+  in
+
+  let rec ch_args vl instrlist = 
+    match vl with
+    | (arg, CT_string) :: other -> 
+      let new_il = instrs_ch_type (flexp (Name (arg, 0)) (CT_sstring)) 
+        (fcval (Name (arg, 0)) (CT_sstring)) 
+        (finstr (Name (arg, 0)) (CT_sstring))
+        instrlist in
+      ch_args other new_il
+    | head :: tail -> ch_args tail instrlist
+    | []  -> instrlist  
+  in
+  
+  (** Функция определяет, можно ли оптимизировать данную строку *)
+  let rec optimization_criteria id opt_functions = function
+    | _ -> true 
+    | h :: t when string_of_id h = "a" -> false
+    | h :: t -> optimization_criteria id opt_functions t
+    | [] -> true 
+  in  
+  
+  let try_subst_str id body = 
+    let data = check_str_inclusions id body in
+    if optimization_criteria id [] data then
+      let _ = Printf.printf "optimization criteria true" in
+      instrs_ch_type (flexp (Name (id, 0)) (CT_sstring)) 
+        (fcval (Name (id, 0)) (CT_sstring)) (finstr (Name (id, 0)) (CT_sstring)) body
+    else body
+  in
+
+  let rec loop body = function 
+    | h :: t -> 
+      let new_body = body |> try_subst_str h in loop new_body t
+    | [] -> body
+  in
+
+  let _, arg_ctyps, ret_ctyp, _ =
+    match Bindings.find_opt old_id ctx.valspecs with
+    | Some vs -> vs
+    | None -> c_error ~loc:(id_loc old_id) ("Error: no valspec found for " ^ string_of_id function_id)
+  in  
+  let string_arg = List.fold_left2 (fun acc arg t-> match t with 
+          | CT_string -> (arg, t) :: acc  
+          | _ -> acc ) [] args arg_ctyps 
+  in
+  let new_arg_ctyps = arg_ctyps |> List.map (function | CT_string -> CT_sstring | t -> t) in
+  let new_ret_ctyp = match ret_ctyp with
+    | CT_string -> CT_sstring
+    | t -> t
+  in
+  let decls = get_str_decls body in
+  Printf.printf "Decls num %i" (List.length decls);
+  let new_body = loop body decls 
+    |> ch_args string_arg
+  in
+  CDEF_fundef (function_id, None, args, new_body), new_arg_ctyps, new_ret_ctyp
+*)
+
+let insert_optimized_types cdl =
+  
+  let change_struct_types = function
+    | (i, CT_lbits) -> (i, CT_sbits 64)
+    | (i, CT_lint) -> (i, CT_fint 64)
+    | _ as t -> t
+  in 
+  
+  let rec sub = function
+    | CDEF_aux ((CDEF_type (CTD_struct (sid, cont))), ann) as struct_def :: other ->
+      let new_sid = mk_id ("__fast__"  ^ string_of_id sid) in
+      let new_cont = List.map change_struct_types cont in
+      struct_def :: (CDEF_aux ((CDEF_type (CTD_struct (new_sid, new_cont))), ann)) :: sub other
+    | h :: other  -> h :: sub other
+    | [] -> []
+  in
+  sub cdl
+
+
+let sgen_func_uid uid =
+  let str = zencode_uid uid in
+  !opt_prefix ^ String.sub str 1 (String.length str - 1)
+
+let fast_func_list = ["fast_sail_truncate"; "fast_zero_extend"; "powi"]
+
+let funcs =
+  Substs.empty 
+  |> Substs.add ("add_bits_int") (fun ret args -> I_copy (CL_id (ret, CT_sbits 64), V_call (Bvadd, args)))
+  |> Substs.add ("sub_int") (fun ret args -> I_copy (CL_id (ret, CT_fint 64), V_call (Isub, args)))
+  |> Substs.add ("add_int") (fun ret args -> I_copy (CL_id (ret, CT_fint 64), V_call (Iadd, args)))
+  |> Substs.add ("lteq") (fun ret args -> I_copy (CL_id (ret, CT_bool), V_call (Ilteq, args)))
+  |> Substs.add ("pow2") (fun ret args -> I_funcall ((CR_one (CL_id (ret, CT_fint 64))), false, ((mk_id "powi"), [(CT_fint 64); (CT_fint 64)]), args))
+  |> Substs.add ("z__id") (fun ret args -> I_copy (CL_id (ret, CT_fint 64), List.hd args))
+  |> Substs.add ("sail_unsigned") (fun ret args -> I_copy (CL_id (ret, CT_sbits 64), List.hd args))
+  (** CHECK!!! *)
+  |> Substs.add ("zero_extend") (fun ret args -> I_funcall ((CR_one (CL_id (ret, CT_sbits 64))), false, ((mk_id "fast_zero_extend"), [(CT_sbits 64); (CT_fint 64)]), args))
+  |> Substs.add ("sail_truncate") (fun ret args -> I_funcall ((CR_one (CL_id (ret, CT_sbits 64))), false, ((mk_id "fast_sail_truncate"), [(CT_sbits 64); (CT_fint 64)]), args))
+
+
+
+let polymorph_funcs = IdSet.empty |> IdSet.add (mk_id "bits_str")
+
+let get_fname ctx (I_funcall (ret, special_extern, (id, ctyplist), args)) = 
+  if special_extern then string_of_id id
+  else if ctx_is_extern id ctx then ctx_get_extern id ctx
+  else sgen_func_uid (id, ctyplist)
+
+
+let gen_optimized_id = ()
+
+
+(** Get funcalls from function body *)
+let collect_funcalls ctx body =
+  let rec sub = function
+    | I_aux (((I_funcall (_, _, (id, _), cvl) as fc)), iann) :: tail when List.exists (function | V_id (_, CT_lbits) | V_id (_, CT_lint) -> true | _-> false) cvl-> 
+      let fname = get_fname ctx fc in
+      print_endline ("Fcall1 " ^ (string_of_id id));
+      List.iter (fun ct -> print_string (string_of_cval ct)) cvl;
+      fname :: sub tail
+    | I_aux ((I_funcall (_, _, (id, ctl), _)), iann) :: tail -> 
+      print_endline ("Fcall2 " ^ (string_of_id id));
+      List.iter (fun ct -> print_string (string_of_ctyp ct)) ctl;
+      sub tail
+    | I_aux (I_block block, annot) :: instrs -> (sub block) @ (sub instrs)
+    | I_aux (I_if (cval, then_instrs, else_instrs, ctyp), annot) :: instrs ->
+        (sub then_instrs) @ (sub else_instrs) @ (sub instrs)
+    | I_aux (I_try_block block, annot) :: instrs -> (sub block) @ sub instrs
+    | h :: t -> sub t
+    | [] -> [] 
+  in
+  sub body
+
+
+(** Надо проверять вхождения переменных 
+  vars -- бывшие sail_int и lbits
+*)
+let var_usage vars body =
+  (** Находим переменные из vars которые есть среди списка cval *)
+  let find_used =
+    List.fold_left (fun acc -> function 
+      | V_id ((Name (i, _)), _) -> if (List.exists (fun vid -> Id.compare i vid = 0) vars) then i :: acc else acc
+      | _ -> acc) [] 
+  in
+  let rec sub = function
+    | I_aux ((I_funcall (_, _, (id, _), cvl)), iann) :: tail ->
+      let used = find_used cvl in
+      id :: sub tail
+    | I_aux (I_block block, annot) :: instrs -> (sub block) @ (sub instrs)
+    | I_aux (I_if (cval, then_instrs, else_instrs, ctyp), annot) :: instrs ->
+        (sub then_instrs) @ (sub else_instrs) @ (sub instrs)
+    | I_aux (I_try_block block, annot) :: instrs -> (sub block) @ sub instrs
+    | h :: t -> sub t
+    | [] -> [] 
+  in
+  sub body
+
+
+let optimization_criteria optimized_funcs ctx (CDEF_fundef (function_id, heap_return, args, body)) =
+  print_endline ("FN: " ^ string_of_id function_id);
+  let funcalls = collect_funcalls ctx body in
+  funcalls |> List.map (fun x -> x ^ ";") |> List.iter print_string;
+  print_endline "========================"; 
+  let rec check = function
+    | h :: t -> 
+      if List.exists (fun fid -> h = fid) optimized_funcs 
+        || Substs.exists (fun fid _ -> h = fid) funcs
+        (*|| IdSet.exists (fun fid -> Id.compare fid h = 0) polymorph_funcs*) 
+        then 
+        check t 
+      else (
+        print_string ("Not specialized: " ^ h);
+        false)
+    | [] -> true
+  in
+  check funcalls
+
+
+let ch_funcalls ctx vars body =   
+  let vu = VarInclusions.empty in
+  let rec sub = function
+    | I_aux ((I_funcall ((CR_one (CL_id (r, _))), special_extern, (id, ctyplist), args) as fc), iann) :: tail -> 
+      print_endline "====";
+      let fname =
+        if special_extern then string_of_id id
+        else if ctx_is_extern id ctx then ctx_get_extern id ctx
+        else sgen_func_uid (id, ctyplist)
+      in
+
+      print_endline ("Func: " ^ (string_of_id id) ^ " --> " ^ fname);
+      let s = Substs.find_opt fname funcs in
+      
+      let new_exp  = (match s with
+        | Some f -> print_endline "Found"; f r args
+        | _ -> print_endline "Not Found"; fc) 
+      in
+
+      I_aux (new_exp, iann) :: sub tail
+    | I_aux ((I_funcall ((CR_one (CL_addr (CL_id (n, ct)))), special_extern, (id, ctyplist), args) as fc), iann) :: tail -> 
+      print_endline "This!!!";
+      I_aux ((I_funcall ((CR_one (CL_addr (CL_id (n, ct)))), special_extern, (id, ctyplist), args)), iann) :: sub tail
+    | I_aux (I_block block, annot) :: instrs -> I_aux (I_block (sub block), annot) :: sub instrs
+    | I_aux (I_if (cval, then_instrs, else_instrs, ctyp), annot) :: instrs ->
+        I_aux (I_if (cval, sub then_instrs, sub else_instrs, ctyp), annot) :: sub instrs
+    | I_aux (I_try_block block, annot) :: instrs -> I_aux (I_try_block (sub block), annot) :: sub instrs
+    | h :: t -> h :: sub t
+    | [] -> [] 
+  in
+  sub body
+  
+
+(** для функции с выходным аргументом гарантированно будет специализация, т. к. это проверено ранее *)
+let ch_heap_return ctx ret_arg new_ret_ctyp ilist = 
+  let rec loop = function
+    | I_aux (((I_funcall ((CR_one (CL_addr (CL_id (Name (arg, req), _)))), _, (func_id, _), cvl) as fc)), iann) :: tail when Id.compare arg ret_arg = 0 -> 
+      let fname = get_fname ctx fc in
+      let return_var = gensym () in
+      let return_var_decl = idecl (id_loc func_id) new_ret_ctyp (Name (return_var, req)) in  
+      
+      let s = Substs.find_opt fname funcs in
+      print_endline ("requirement: " ^ string_of_int req);
+      let new_funcall = 
+        (match s with
+          | Some f -> print_endline "Found"; f (Name (return_var, req)) cvl
+          | _ -> print_endline "Not Found"; fc) 
+      in
+      (*let new_funcall = I_funcall (CR_one ((CL_id (Name (return_var, 0), new_ret_ctyp))), _, (func_id, _), cvl) in*)
+      List.iter (fun ct -> print_string (string_of_cval ct)) cvl;
+      let ret_instr = ireturn (V_id (Name (return_var, req), new_ret_ctyp)) in
+      return_var_decl :: I_aux (new_funcall, iann) :: ret_instr :: loop tail
+    | I_aux (I_block block, annot) :: instrs -> I_aux (I_block (loop block), annot) :: loop instrs
+    | I_aux (I_if (cval, then_instrs, else_instrs, ctyp), annot) :: instrs ->
+      I_aux (I_if (cval, (loop then_instrs), (loop else_instrs), ctyp), annot) :: loop instrs
+    | I_aux (I_try_block block, annot) :: instrs -> (loop block) @ loop instrs
+    | h :: t -> h :: loop t
+    | [] -> [] 
+  in
+  loop ilist
+  
+
+(** return new function body and new signature *)
+let heap_to_stack old_id ctx (CDEF_fundef (function_id, heap_return, args, body)) =
+  let flexp (Name (did, _)) t = function 
+    | CL_id ((Name (n, _) as varname), _) when Id.compare did n = 0 -> 
+      print_endline "var found";
+      CL_id (varname, t)
+    | _ as cv -> 
+      print_endline "continue...";
+      cv
+  in
+
+  let fcval (Name (did, _)) t = function 
+    | V_id ((Name (n, _) as varname), _) when Id.compare did n = 0 -> 
+      print_endline "var found";
+      V_id (varname, t)
+    | _ as cv -> 
+      print_endline "continue...";
+      cv
+  in
+  
+  let _, arg_ctyps, ret_ctyp, _ =
+    match Bindings.find_opt old_id ctx.valspecs with
+    | Some vs -> vs
+    | None -> c_error ~loc:(id_loc old_id) ("No valspec found for " ^ string_of_id function_id)
+  in
+
+  let gmp_arg = List.fold_left2 (fun acc arg t-> match t with 
+          | CT_lbits -> (arg, t) :: acc 
+          | CT_lint -> (arg, t) :: acc 
+          | _ -> acc ) [] args arg_ctyps 
+  in
+
+  let new_arg_ctyps = arg_ctyps |> List.map (function | CT_lbits -> CT_sbits 64 | CT_lint -> CT_fint 64 | t -> t) in
+  
+  (** здесь нужна проверка, что для всех переменных есть спец функции *)
+
+  (** Меняем тип тип аргументов для всех вхождений в тело функции *)
+  let rec ch_args vl instrlist = 
+    match vl with
+    | (arg, CT_lbits) :: other -> 
+      let new_il = instrs_ch_type 
+        (flexp (Name (arg, 0)) (CT_sbits 64)) 
+        (fcval (Name (arg, 0)) (CT_sbits 64)) 
+        (fun x -> x) instrlist in
+      ch_args other new_il
+    | (arg, CT_lint) :: other -> 
+      let new_il = instrs_ch_type 
+        (flexp (Name (arg, 0)) (CT_fint 64)) 
+        (fcval (Name (arg, 0)) (CT_fint 64)) 
+        (fun x -> x) instrlist in
+      ch_args other new_il
+    | head :: tail -> ch_args tail instrlist
+    | []  -> instrlist
+  in
+
+
+  (** замена return *)
+  let new_ret_ctyp = match ret_ctyp with
+    | CT_lbits -> CT_sbits 64
+    | CT_lint -> CT_fint 64
+    | _ -> ret_ctyp
+  in
+  
+  let rec delete_unused_clear delete_var = function
+    | I_aux ((I_clear (_, Name (i, _))), iann) :: tail when Id.compare i delete_var = 0 -> 
+      tail
+    | I_aux (I_block block, annot) :: instrs -> 
+      I_aux (I_block (delete_unused_clear delete_var block), annot) :: delete_unused_clear delete_var instrs
+    | I_aux (I_if (cval, then_instrs, else_instrs, ctyp), annot) :: instrs ->
+        I_aux (I_if (cval, delete_unused_clear delete_var then_instrs, delete_unused_clear delete_var else_instrs, ctyp), annot) :: delete_unused_clear delete_var instrs
+    | I_aux (I_try_block block, annot) :: instrs -> I_aux (I_try_block (delete_unused_clear delete_var block), annot) :: delete_unused_clear delete_var instrs
+    | h :: t -> h :: delete_unused_clear delete_var t
+    | [] -> []
+  in
+
+  let rec ch_gmp_types = function
+    | I_aux (I_decl (CT_lint, (Name (i, r) as decl_id)), annot) :: instrs ->
+      print_endline ("Declaration: " ^ (string_of_id i));
+      let new_il = instrs 
+        |> instrs_ch_type (flexp decl_id (CT_fint 64)) (fcval decl_id (CT_fint 64)) (fun x -> x)
+        |> delete_unused_clear i
+      in
+
+      I_aux (I_decl (CT_fint 64, decl_id), annot) :: ch_gmp_types new_il
+    
+    | I_aux (I_init (CT_lint, (Name (i, r) as decl_id), cv), annot) :: instrs ->
+      print_endline ("Declaration: " ^ (string_of_id i));
+      let new_il = instrs 
+        |> instrs_ch_type (flexp decl_id (CT_fint 64)) (fcval decl_id (CT_fint 64)) (fun x -> x)
+        |> delete_unused_clear i
+      in
+      I_aux (I_init (CT_fint 64, decl_id, cv), annot) :: ch_gmp_types new_il
+    
+    | I_aux (I_decl (CT_lbits, (Name (i, r) as decl_id)), annot) :: instrs ->
+      print_endline ("Declaration: " ^ (string_of_id i));
+      let new_il = instrs 
+        |> instrs_ch_type (flexp decl_id (CT_sbits 64)) (fcval decl_id (CT_sbits 64)) (fun x -> x)
+        |> delete_unused_clear i 
+      in
+      I_aux (I_decl (CT_sbits 64, decl_id), annot) :: ch_gmp_types new_il
+    
+    | I_aux (I_init (CT_lbits, (Name (i, r) as decl_id), cv), annot) :: instrs ->
+      print_endline ("Declaration: " ^ (string_of_id i));
+      let new_il = instrs 
+        |> instrs_ch_type (flexp decl_id (CT_sbits 64)) (fcval decl_id (CT_sbits 64)) (fun x -> x)
+        |> delete_unused_clear i 
+      in
+      I_aux (I_init (CT_sbits 64, decl_id, cv), annot) :: ch_gmp_types new_il
+    
+    | I_aux (I_block block, annot) :: instrs -> I_aux (I_block (ch_gmp_types block), annot) :: ch_gmp_types instrs
+    | I_aux (I_if (cval, then_instrs, else_instrs, ctyp), annot) :: instrs ->
+        I_aux (I_if (cval, ch_gmp_types then_instrs, ch_gmp_types else_instrs, ctyp), annot) :: ch_gmp_types instrs
+    | I_aux (I_try_block block, annot) :: instrs -> I_aux (I_try_block (ch_gmp_types block), annot) :: ch_gmp_types instrs
+    | instr :: instrs -> instr :: ch_gmp_types instrs
+    | [] -> []
+  in
+  
+  print_endline "Here!!!";
+  
+  let change_ret_fn = 
+    match heap_return with
+    | Some r -> 
+      print_endline "Heap return!!!";
+      ch_heap_return ctx r new_ret_ctyp
+    | _ -> (fun x -> x)
+  in
+  let new_body = body 
+    |> ch_args gmp_arg 
+    |> ch_gmp_types 
+    |> change_ret_fn
+    |> ch_funcalls ctx [] in
+  CDEF_fundef (function_id, None, args, new_body), new_arg_ctyps, new_ret_ctyp
+
+
 let uid_cnt = ref 0
+
 let mk_uniq id =
   print_endline ("mk_uniq " ^ string_of_id id);
   let new_id = string_of_id id ^ string_of_int !uid_cnt |> mk_id in
   incr uid_cnt;
   name new_id
+
+let rec mk_reserved n =
+  if n < 0 then []
+  else 
+    let id = mk_id ("ghvar_" ^ string_of_int !uid_cnt) in
+    incr uid_cnt; 
+    name id :: mk_reserved (n - 1)
+
 
 let startup_vecs = ref []
 
@@ -772,6 +1393,32 @@ let vec_extraction il =
   let res = sub il in
   (res, !d, !old_names, !renames)
 
+let optimized_typ = function
+  | CT_lbits | CT_lint -> true
+  | _ -> false
+
+let gmp_extraction sail_array styp il =
+  let idx = ref 0 in
+  let rec sub = function
+    | I_aux (I_decl (ct, Name (n, i)), ia) :: tail when styp = ct ->
+        (*let hid = mk_uniq n in*)
+        let hid = List.nth sail_array !idx in
+        incr idx;
+        (*old_names := name :: !old_names;*)
+        (*print_endline ("vector: " ^ string_of_id n);*)
+        let new_tail = instrs_rename (Name (n, i)) hid tail in
+        (*I_aux (I_decl (ct, Name (n, i)), ia) :: *)
+        I_aux (I_reset (ct, hid), ia) :: sub new_tail
+    | I_aux (I_clear (ct, Name (n, i)), _) :: tail when styp = ct -> sub tail
+    | I_aux (I_block il, ia) :: tail -> I_aux (I_block (sub il), ia) :: sub tail
+    | I_aux (I_if (cval, then_instrs, else_instrs, ctyp), annot) :: instrs ->
+        I_aux (I_if (cval, sub then_instrs, sub else_instrs, ctyp), annot) :: sub instrs
+    | I_aux (I_try_block block, annot) :: instrs -> I_aux (I_try_block (sub block), annot) :: sub instrs
+    | h :: t -> h :: sub t
+    | [] -> []
+  in
+  sub il
+
 
 let insert_to_startup cdl new_instrs fid =
   let rec loop = function
@@ -787,7 +1434,7 @@ let insert_to_startup cdl new_instrs fid =
   loop cdl
 
 
-let check_vectors_in_clause defs =
+let optimize_allocations ctx defs =
   let rec check_branch id = function
     | I_aux (I_funcall (CR_one (CL_id (name, ct)), se, (fid, ctl), ctv), ia) :: tail
       when string_of_id fid = string_of_id id ->
@@ -799,17 +1446,22 @@ let check_vectors_in_clause defs =
     | _ :: t -> check_branch id t
     | _ -> true
   in
+  let reserved_lbits_variables = mk_reserved 100 in
+  let reserved_lint_variables = mk_reserved 300 in
   
-  let find_patterns id insts =
+  let find_patterns func_id insts =
     let acc = ref [] in
     let rec find x =
       match x with
-      | I_aux (I_label str0, ia0) 
+      | I_aux (I_label str0, ia0)
         :: I_aux (I_block (I_aux (I_jump (V_ctor_kind (cv, (id, ctl), ct), i), ia2) :: old_branch), ia3)
-        :: other when check_branch id old_branch ->
+        :: other when check_branch func_id old_branch ->
+          print_string (string_of_id id);
           (*print_endline ("PATTERN FOUND 1 " ^ str0);*)
-          let new_branch, d, old_names, renames = vec_extraction old_branch in
-          acc := d @ !acc;
+          let new_branch = gmp_extraction reserved_lbits_variables CT_lbits old_branch
+            |> gmp_extraction reserved_lint_variables CT_lint in
+          (*let new_branch, d, old_names, renames = vec_extraction old_branch in*)
+          (*acc := d @ !acc;*)
           I_aux (I_label str0, ia0)
           :: I_aux (I_block (I_aux (I_jump (V_ctor_kind (cv, (id, ctl), ct), i), ia2) :: new_branch), ia3)
           :: find other
@@ -821,25 +1473,107 @@ let check_vectors_in_clause defs =
     new_insts, !acc
   in
 
-  let rec loop = function
-    | CDEF_aux (CDEF_fundef (function_id, heap_return, args, body), def_annot) :: other ->
+  let rec loop optimized curr_ctx = function
+    (*
+    | CDEF_aux (CDEF_fundef (function_id, heap_return, args, body), def_annot) :: other when string_of_id function_id = "execute" ->
         print_endline "EXECUTE FOUND";
         let new_body, vectors = find_patterns function_id body in
-        let new_decls = vectors |> List.map (fun (name, ct, l) -> idecl l ct name) in
-        let new_clears = vectors |> List.map (fun (name, ct, l) -> iclear ct name) in
+        (*let new_decls = vectors |> List.map (fun (name, ct, l) -> idecl l ct name) in
+        let new_clears = vectors |> List.map (fun (name, ct, l) -> iclear ct name) in*)
+        let new_decls_lbits = reserved_lbits_variables |> List.map (fun v -> idecl Parse_ast.Unknown CT_lbits v) in
+        let new_decls_lint = reserved_lint_variables |> List.map (fun v -> idecl Parse_ast.Unknown CT_lint v) in
+        let new_clears = reserved_lbits_variables |> List.map (fun v -> iclear CT_lbits v) in
+        
         let new_startup =
-          CDEF_aux (CDEF_startup (function_id, List.rev new_decls), mk_def_annot (gen_loc def_annot.loc) ())
+          CDEF_aux (CDEF_startup (function_id, List.rev (new_decls_lbits @ new_decls_lint )), mk_def_annot (gen_loc def_annot.loc) ())
         in
         let new_finish =
           CDEF_aux (CDEF_finish (function_id, List.rev new_clears), mk_def_annot (gen_loc def_annot.loc) ())
         in 
-        new_startup :: CDEF_aux (CDEF_fundef (function_id, heap_return, args, new_body), def_annot) :: new_finish :: loop other
-    | h :: t -> h :: loop t
-    | _ -> []
+        new_startup :: CDEF_aux (CDEF_fundef (function_id, heap_return, args, new_body), def_annot) :: new_finish :: loop curr_ctx other
+    *)
+    (*"translate_TLB_hit" "fetch" *)
+    | ((CDEF_aux (CDEF_fundef (function_id, heap_return, args, body), def_annot)) as aux) :: other when string_of_id function_id = "privLevel_to_str" ->
+    (*| ((CDEF_aux ((CDEF_fundef (function_id, heap_return, args, body) as fundef), def_annot)) as aux) :: other when optimization_criteria optimized curr_ctx fundef ->*)
+    
+      print_endline "TEST FN FOUND!";
+      let module Jibc = Make (C_config (struct
+        let branch_coverage = !opt_branch_coverage
+      end)) in
+
+      let new_id = mk_id ("__fast__" ^ string_of_id function_id) in
+      (*Jibc.print_cdef "3" (CDEF_aux (CDEF_fundef ((mk_id ("tlb_optimized")), heap_return, args, body), def_annot));*)
+      
+      let _, arg_ctyps, ret_ctyp, _ =
+        match Bindings.find_opt function_id curr_ctx.valspecs with
+        | Some vs -> vs
+        | None -> c_error ~loc:(id_loc function_id) ("No valspec found for " ^ string_of_id function_id)
+      in
+
+      let optimized_fn, new_arg_ctyps, new_ret_ctyp = heap_to_stack function_id ctx (CDEF_fundef (new_id, heap_return, args, body)) in
+      let updated_ctx = {
+        curr_ctx with
+          valspecs = curr_ctx.valspecs |> Bindings.add 
+            new_id (Some ("__fast__" ^ string_of_id function_id), new_arg_ctyps, new_ret_ctyp, empty_uannot); 
+        }
+      in
+
+      let n, c = loop ((string_of_id function_id) :: optimized) updated_ctx other in
+      aux :: CDEF_aux (optimized_fn, def_annot) :: n, c
+    | h :: t -> 
+      let n, c =  loop optimized curr_ctx t in
+      (h :: n), c
+    | _ -> [], curr_ctx
+  in
+  let rec loop_str curr_ctx = function
+    | ((CDEF_aux (CDEF_fundef (function_id, heap_return, args, body), def_annot)) as aux) :: other when string_of_id function_id = "step" ->
+      (** анализируем возможность оптимизации в части АСТ *)
+      let new_id = mk_id ("__fast_str__" ^ string_of_id function_id) in
+      let _, arg_ctyps, ret_ctyp, _ =
+        match Bindings.find_opt function_id ctx.valspecs with
+        | Some vs -> vs
+        | None -> c_error ~loc:(id_loc function_id) ("No valspec found for " ^ string_of_id function_id)
+      in
+      
+      let optimized_fn, new_arg_ctyps, new_ret_ctyp = StrOpt.optimize_str_function function_id ctx (CDEF_fundef (new_id, heap_return, args, body)) in
+      
+      let updated_ctx = {
+        curr_ctx with
+          valspecs = curr_ctx.valspecs |> Bindings.add 
+            new_id (Some ("__fast_str__" ^ string_of_id function_id), arg_ctyps, ret_ctyp, empty_uannot);
+        }
+      in
+      let n, c = loop_str updated_ctx other in
+      aux :: (CDEF_aux (optimized_fn, def_annot)) :: n, c
+    
+    (*| ((CDEF_aux (CDEF_fundef (function_id, heap_return, args, body), def_annot)) as aux) :: other when string_of_id function_id = "privLevel_to_str" ->
+      let new_id = mk_id ("__fast_str__" ^ string_of_id function_id) in
+      let _, arg_ctyps, ret_ctyp, _ =
+        match Bindings.find_opt function_id ctx.valspecs with
+        | Some vs -> vs
+        | None -> c_error ~loc:(id_loc function_id) ("No valspec found for " ^ string_of_id function_id)
+      in
+      
+      let optimized_fn, new_arg_ctyps, new_ret_ctyp = StrOpt.optimize_str_function function_id ctx (CDEF_fundef (new_id, heap_return, args, body)) in
+      
+      let updated_ctx = {
+        curr_ctx with
+          valspecs = curr_ctx.valspecs |> Bindings.add 
+            new_id (Some ("__fast_str__" ^ string_of_id function_id), new_arg_ctyps, new_ret_ctyp, empty_uannot); 
+        }
+      in
+      let n, c = loop_str updated_ctx other in
+      aux :: (CDEF_aux (optimized_fn, def_annot)) :: n, c*)
+    | h :: t -> 
+      let n, c = loop_str curr_ctx t in
+      (h :: n), c
+    | [] -> [], curr_ctx
   in
 
-  let new_defs = loop defs in
-  new_defs
+
+  (*let new_defs, new_ctx = loop [] ctx defs in*)
+  let new_defs, new_ctx = loop_str ctx defs in
+  new_defs, new_ctx
 
 
 let check_vectors recursive_functions defs =
@@ -1006,16 +1740,25 @@ let optimize recursive_functions cdefs =
   cdefs
   |> (if !optimize_alias then concatMap remove_alias else nothing)
   |> (if !optimize_alias then combine_variables else nothing)
+  |> 
+  if !optimize_hoist_allocations && not !opt_no_rts then concatMap (hoist_allocations recursive_functions) else nothing
   (* We need the runtime to initialize hoisted allocations *)
-  |>
+  (*|>
   (if !optimize_hoist_allocations && not !opt_no_rts then
-    concatMap (recursive_functions |> hoist_allocations ) else nothing)
-  |> (if !optimize_hoist_allocations && not !opt_no_rts then
-    recursive_functions |> check_vectors else nothing)
-  |>
+    concatMap (recursive_functions |> hoist_allocations ) else nothing)*)
+  (*|> (if !optimize_hoist_allocations && not !opt_no_rts then
+    recursive_functions |> check_vectors else nothing)*)
+  (*|>
   (if !optimize_hoist_allocations && not !opt_no_rts then
-    check_vectors_in_clause else nothing)
+    check_vectors_in_clause else nothing)*)
 
+let optimize_heap_vars cdefs ctx =
+    print_string "optimize_heap_vars!\n\n";
+    let nothing ctx cdefs = cdefs, ctx in
+    cdefs
+    |>
+    (if !optimize_hoist_allocations && not !opt_no_rts then
+      optimize_allocations ctx else nothing ctx)
 
 (**************************************************************************)
 (* 6. Code generation                                                     *)
@@ -1053,6 +1796,7 @@ let rec sgen_ctyp = function
   | CT_vector _ as v -> Util.zencode_string (string_of_ctyp v)
   | CT_fvector (_, typ) -> sgen_ctyp (CT_vector typ)
   | CT_string -> "sail_string"
+  | CT_sstring -> "sail_sstring"
   | CT_real -> "real"
   | CT_ref ctyp -> sgen_ctyp ctyp ^ "*"
   | CT_float n -> "float" ^ string_of_int n ^ "_t"
@@ -1060,7 +1804,8 @@ let rec sgen_ctyp = function
   | CT_memory_writes -> "sail_memory_writes"
   | CT_poly _ -> "POLY" (* c_error "Tried to generate code for non-monomorphic type" *)
 
-let sgen_const_ctyp = function CT_string -> "const_sail_string" | ty -> sgen_ctyp ty
+(* const_sail_string *)
+let sgen_const_ctyp = function CT_string -> "sail_string" | ty -> sgen_ctyp ty
 
 let sgen_mask n =
   if n = 0 then "UINT64_C(0)"
@@ -1082,7 +1827,7 @@ let sgen_value = function
   | VL_bit Sail2_values.B1 -> "UINT64_C(1)"
   | VL_bit Sail2_values.BU -> failwith "Undefined bit found in value"
   | VL_real str -> str
-  | VL_string str -> "\"" ^ str ^ "\""
+  | VL_string str -> "string_of_lit(\"" ^ str ^ "\")" ^ "/* Str lit */"
   | VL_enum element -> Util.zencode_string element
   | VL_ref r -> "&" ^ Util.zencode_string r
   | VL_undefined -> Reporting.unreachable Parse_ast.Unknown __POS__ "Cannot generate C value for an undefined literal"
@@ -1343,32 +2088,34 @@ let sq_separate_map sep f xs = separate sep (squash_empty (List.map f xs))
 let rec codegen_instr fid ctx (I_aux (instr, (_, l))) =
   let open Printf in
   match instr with
-  | I_decl (ctyp, id) when is_stack_ctyp ctyp -> ksprintf string "  %s %s;" (sgen_ctyp ctyp) (sgen_name id)
+  | I_decl (ctyp, id) when is_stack_ctyp ctyp -> ksprintf string "  %s %s;" (sgen_ctyp ctyp) (sgen_name id) ^^ ksprintf string "/* I_decl %s */" (string_of_ctyp ctyp)
   | I_decl (ctyp, id) ->
       ksprintf string "  %s %s;" (sgen_ctyp ctyp) (sgen_name id)
       ^^ hardline
-      ^^ sail_create ~prefix:"  " ~suffix:";" (sgen_ctyp_name ctyp) "&%s" (sgen_name id)
-  | I_copy (clexp, cval) -> codegen_conversion l clexp cval
-  | I_jump (cval, label) -> ksprintf string "  if (%s) goto %s;" (sgen_cval cval) label
-  | I_if (cval, [], else_instrs, ctyp) -> codegen_instr fid ctx (iif l (V_call (Bnot, [cval])) else_instrs [] ctyp)
+      ^^ sail_create ~prefix:"  " ~suffix:";" (sgen_ctyp_name ctyp) "&%s" (sgen_name id) ^^ ksprintf string "/* I_decl %s */" (string_of_ctyp ctyp)
+  | I_copy (clexp, cval) -> 
+    let s = string_of_clexp clexp ^ string_of_cval cval in
+    (codegen_conversion l clexp cval) ^^ ksprintf string "/* I_copy %s */" s
+  | I_jump (cval, label) -> ksprintf string "  if (%s) goto %s;" (sgen_cval cval) label ^^ string "/* I_jump */"
+  | I_if (cval, [], else_instrs, ctyp) -> codegen_instr fid ctx (iif l (V_call (Bnot, [cval])) else_instrs [] ctyp) ^^ string "/* I_if */"
   | I_if (cval, [then_instr], [], _) ->
       ksprintf string "  if (%s)" (sgen_cval cval)
       ^^ space
-      ^^ surround 2 0 lbrace (codegen_instr fid ctx then_instr) (twice space ^^ rbrace)
+      ^^ surround 2 0 lbrace (codegen_instr fid ctx then_instr) (twice space ^^ rbrace) ^^ string "/* I_if */"
   | I_if (cval, then_instrs, [], _) ->
       string "  if" ^^ space
       ^^ parens (string (sgen_cval cval))
       ^^ space
-      ^^ surround 2 0 lbrace (separate_map hardline (codegen_instr fid ctx) then_instrs) (twice space ^^ rbrace)
+      ^^ surround 2 0 lbrace (separate_map hardline (codegen_instr fid ctx) then_instrs) (twice space ^^ rbrace) ^^ string "/* I_if */"
   | I_if (cval, then_instrs, else_instrs, _) ->
       string "  if" ^^ space
       ^^ parens (string (sgen_cval cval))
       ^^ space
       ^^ surround 2 0 lbrace (sq_separate_map hardline (codegen_instr fid ctx) then_instrs) (twice space ^^ rbrace)
       ^^ space ^^ string "else" ^^ space
-      ^^ surround 2 0 lbrace (sq_separate_map hardline (codegen_instr fid ctx) else_instrs) (twice space ^^ rbrace)
+      ^^ surround 2 0 lbrace (sq_separate_map hardline (codegen_instr fid ctx) else_instrs) (twice space ^^ rbrace) ^^ string "/* I_if */"
   | I_block instrs ->
-      string "  {" ^^ jump 2 2 (sq_separate_map hardline (codegen_instr fid ctx) instrs) ^^ hardline ^^ string "  }"
+      string "  {" ^^ string "/* I_block */" ^^ jump 2 2 (sq_separate_map hardline (codegen_instr fid ctx) instrs) ^^ hardline ^^ string "  }" 
   | I_try_block instrs ->
       string "  { /* try */"
       ^^ jump 2 2 (sq_separate_map hardline (codegen_instr fid ctx) instrs)
@@ -1383,10 +2130,14 @@ let rec codegen_instr fid ctx (I_aux (instr, (_, l))) =
       let ctyp = clexp_ctyp x in
       let is_extern = ctx_is_extern (fst f) ctx || special_extern in
       let fname =
-        if special_extern then string_of_id (fst f)
+        if List.exists (fun x -> x = (f |> fst |> string_of_id)) fast_func_list then  string_of_id (fst f)
+        else if special_extern then string_of_id (fst f)
         else if ctx_is_extern (fst f) ctx then ctx_get_extern (fst f) ctx
         else sgen_function_uid f
       in
+      let fn = f |> fst |> string_of_id in
+      let sargs = args |> List.map (fun a -> string_of_cval a) |> List.fold_left (^) "" in
+      let s = ksprintf string "/* I_funcall %s == %s*/" fn sargs in
       let fname =
         match (fname, ctyp) with
         | "internal_pick", _ -> Printf.sprintf "pick_%s" (sgen_ctyp_name ctyp)
@@ -1426,7 +2177,7 @@ let rec codegen_instr fid ctx (I_aux (instr, (_, l))) =
             match cval_ctyp (List.nth args 0) with
             | CT_fbits _ -> "string_of_fbits"
             | CT_lbits -> "string_of_lbits"
-            | _ -> assert false
+            | _ -> "assert false"
           end
         | "decimal_string_of_bits", _ -> begin
             match cval_ctyp (List.nth args 0) with
@@ -1443,21 +2194,22 @@ let rec codegen_instr fid ctx (I_aux (instr, (_, l))) =
         | "undefined_list", _ -> Printf.sprintf "UNDEFINED(%s)" (sgen_ctyp_name ctyp)
         | fname, _ -> fname
       in
+      let s = ksprintf string "/* I_funcall %s -> %s extern: %s === args %s */" fn fname (string_of_bool special_extern) sargs in
       if fname = "reg_deref" then
-        if is_stack_ctyp ctyp then string (Printf.sprintf "  %s = *(%s);" (sgen_clexp_pure l x) c_args)
-        else sail_copy ~prefix:"  " ~suffix:";" (sgen_ctyp_name ctyp) "&%s, *(%s)" (sgen_clexp_pure l x) c_args
+        if is_stack_ctyp ctyp then string (Printf.sprintf "  %s = *(%s);" (sgen_clexp_pure l x) c_args) ^^ s
+        else sail_copy ~prefix:"  " ~suffix:";" (sgen_ctyp_name ctyp) "&%s, *(%s)" (sgen_clexp_pure l x) c_args ^^ s
       else if is_stack_ctyp ctyp then
-        string (Printf.sprintf "  %s = %s(%s%s);" (sgen_clexp_pure l x) fname (extra_arguments is_extern) c_args)
-      else string (Printf.sprintf "  %s(%s%s, %s);" fname (extra_arguments is_extern) (sgen_clexp l x) c_args)
+        string (Printf.sprintf "  %s = %s(%s%s);" (sgen_clexp_pure l x) fname (extra_arguments is_extern) c_args) ^^ s
+      else string (Printf.sprintf "  %s(%s%s, %s);" fname (extra_arguments is_extern) (sgen_clexp l x) c_args) ^^ s
   | I_clear (ctyp, _) when is_stack_ctyp ctyp -> empty
-  | I_clear (ctyp, id) -> sail_kill ~prefix:"  " ~suffix:";" (sgen_ctyp_name ctyp) "&%s" (sgen_name id)
+  | I_clear (ctyp, id) -> sail_kill ~prefix:"  " ~suffix:";" (sgen_ctyp_name ctyp) "&%s" (sgen_name id) ^^ string "/* I_clear */"
   | I_init (ctyp, id, cval) ->
-      codegen_instr fid ctx (idecl l ctyp id) ^^ hardline ^^ codegen_conversion l (CL_id (id, ctyp)) cval
+      codegen_instr fid ctx (idecl l ctyp id) ^^ hardline ^^ codegen_conversion l (CL_id (id, ctyp)) cval ^^ ksprintf string "/* I_init (copy) */"
   | I_reinit (ctyp, id, cval) ->
-      codegen_instr fid ctx (ireset l ctyp id) ^^ hardline ^^ codegen_conversion l (CL_id (id, ctyp)) cval
-  | I_reset (ctyp, id) when is_stack_ctyp ctyp -> string (Printf.sprintf "  %s %s;" (sgen_ctyp ctyp) (sgen_name id))
-  | I_reset (ctyp, id) -> sail_recreate ~prefix:"  " ~suffix:";" (sgen_ctyp_name ctyp) "&%s" (sgen_name id)
-  | I_return cval -> twice space ^^ c_return (string (sgen_cval cval))
+      codegen_instr fid ctx (ireset l ctyp id) ^^ hardline ^^ codegen_conversion l (CL_id (id, ctyp)) cval ^^ ksprintf string "/* I_reinit */"
+  | I_reset (ctyp, id) when is_stack_ctyp ctyp -> string (Printf.sprintf "  %s %s;" (sgen_ctyp ctyp) (sgen_name id)) ^^ string "/* I_reset */"
+  | I_reset (ctyp, id) -> sail_recreate ~prefix:"  " ~suffix:";" (sgen_ctyp_name ctyp) "&%s" (sgen_name id) ^^ string "/* I_reset */"
+  | I_return cval -> twice space ^^ c_return (string (sgen_cval cval)) ^^ string "/* I_return */"
   | I_throw _ -> c_error ~loc:l "I_throw reached code generator"
   | I_undefined ctyp ->
       let rec codegen_exn_return ctyp =
@@ -1509,12 +2261,12 @@ let rec codegen_instr fid ctx (I_aux (instr, (_, l))) =
       ^^ hardline
       ^^ string (Printf.sprintf "  return %s;" ret)
   | I_comment str -> string ("  /* " ^ str ^ " */")
-  | I_label str -> string (str ^ ": ;")
+  | I_label str -> string (str ^ ": ;") ^^ string "/* I_label */"
   | I_goto str -> string (Printf.sprintf "  goto %s;" str)
-  | I_raw _ when ctx.no_raw -> empty
-  | I_raw str -> string ("  " ^ str)
-  | I_end _ -> assert false
-  | I_exit _ -> string ("  sail_match_failure(\"" ^ String.escaped (string_of_id fid) ^ "\");")
+  | I_raw _ when ctx.no_raw -> empty ^^ string "/* I_raw */"
+  | I_raw str -> string ("  " ^ str) ^^ string "/* I_raw */"
+  | I_end _ -> assert false ^^ string "/* I_end */"
+  | I_exit _ -> string ("  sail_match_failure(\"" ^ String.escaped (string_of_id fid) ^ "\");") ^^ string "/* I_exit */"
 
 let codegen_type_def =
   let open Printf in
@@ -1591,7 +2343,7 @@ let codegen_type_def =
   | CTD_variant (id, tus) ->
       let codegen_tu (ctor_id, ctyp) =
         separate space [string "struct"; lbrace; string (sgen_ctyp ctyp); codegen_id ctor_id ^^ semi; rbrace]
-      in
+      in  
       (* Create an if, else if, ... block that does something for each constructor *)
       let rec each_ctor v f = function
         | [] -> string "{}"
@@ -2096,7 +2848,7 @@ let codegen_alloc = function
   | I_aux (I_decl (ctyp, id), _) -> sail_create ~prefix:"  " ~suffix:";" (sgen_ctyp_name ctyp) "&%s" (sgen_name id)
   | _ -> assert false
 
-let codegen_def' ctx (CDEF_aux (aux, _)) =
+let codegen_def' ctx (CDEF_aux (aux, da)) =
   match aux with
   | CDEF_register (id, ctyp, _) ->
       string (Printf.sprintf "// register %s" (string_of_id id))
@@ -2106,22 +2858,23 @@ let codegen_def' ctx (CDEF_aux (aux, _)) =
       if ctx_is_extern id ctx then empty
       else if is_stack_ctyp ret_ctyp then
         string
-          (Printf.sprintf "%s%s %s(%s%s);" (static ()) (sgen_ctyp ret_ctyp) (sgen_function_id id) (extra_params ())
+          (Printf.sprintf "%s%s %s(%s%s); /* CDEF_val codegen stack ctyp*/" (static ()) (sgen_ctyp ret_ctyp) (sgen_function_id id) (extra_params ())
              (Util.string_of_list ", " sgen_const_ctyp arg_ctyps)
           )
       else
         string
-          (Printf.sprintf "%svoid %s(%s%s *rop, %s);" (static ()) (sgen_function_id id) (extra_params ())
+          (Printf.sprintf "%svoid %s(%s%s *rop, %s); /* CDEF_val codegen not stack ctyp*/" (static ()) (sgen_function_id id) (extra_params ())
              (sgen_ctyp ret_ctyp)
              (Util.string_of_list ", " sgen_const_ctyp arg_ctyps)
           )
   | CDEF_fundef (id, ret_arg, args, instrs) ->
+      
       let _, arg_ctyps, ret_ctyp, _ =
         match Bindings.find_opt id ctx.valspecs with
         | Some vs -> vs
         | None -> c_error ~loc:(id_loc id) ("No valspec found for " ^ string_of_id id)
       in
-
+      print_endline ("Codegen fn: " ^ (string_of_id id));
       (* Check that the function has the correct arity at this point. *)
       if List.length arg_ctyps <> List.length args then
         c_error ~loc:(id_loc id)
@@ -2138,10 +2891,12 @@ let codegen_def' ctx (CDEF_aux (aux, _)) =
           (fun x -> x)
           (List.map2 (fun ctyp arg -> sgen_const_ctyp ctyp ^ " " ^ sgen_id arg) arg_ctyps args)
       in
+      print_endline ("codegen def " ^ string_of_id id);
       let function_header =
         match ret_arg with
         | None ->
             assert (is_stack_ctyp ret_ctyp);
+            print_endline "Not Heap ret";
             (if !opt_static then string "static " else empty)
             ^^ string (sgen_ctyp ret_ctyp)
             ^^ space ^^ codegen_function_id id
@@ -2149,11 +2904,19 @@ let codegen_def' ctx (CDEF_aux (aux, _)) =
             ^^ hardline
         | Some gs ->
             assert (not (is_stack_ctyp ret_ctyp));
+            print_endline "Heap ret";
             (if !opt_static then string "static " else empty)
             ^^ string "void" ^^ space ^^ codegen_function_id id
             ^^ parens (string (extra_params ()) ^^ string (sgen_ctyp ret_ctyp ^ " *" ^ sgen_id gs ^ ", ") ^^ string args)
             ^^ hardline
       in
+      
+      let module Jibc = Make (C_config (struct
+        let branch_coverage = !opt_branch_coverage
+      end)) in
+      
+      (*if string_of_id id = "step" then Jibc.print_cdef "4" (CDEF_aux (aux, da));*)
+      
       function_header ^^ string "{"
       ^^ jump 0 2 (separate_map hardline (codegen_instr id ctx) instrs)
       ^^ hardline ^^ string "}"
@@ -2216,7 +2979,7 @@ let rec ctyp_dependencies = function
   | CT_struct (_, ctors) -> List.concat (List.map (fun (_, ctyp) -> ctyp_dependencies ctyp) ctors)
   | CT_variant (_, ctors) -> List.concat (List.map (fun (_, ctyp) -> ctyp_dependencies ctyp) ctors)
   | CT_lint | CT_fint _ | CT_lbits | CT_fbits _ | CT_sbits _ | CT_unit | CT_bool | CT_real | CT_bit | CT_string
-  | CT_enum _ | CT_poly _ | CT_constant _ | CT_float _ | CT_rounding_mode | CT_memory_writes ->
+  | CT_sstring | CT_enum _ | CT_poly _ | CT_constant _ | CT_float _ | CT_rounding_mode | CT_memory_writes ->
       []
 
 let codegen_ctg = function
@@ -2268,17 +3031,23 @@ let jib_of_ast env effect_info ast =
   end)) in
   let env, effect_info = add_special_functions env effect_info in
   let ctx = initial_ctx env effect_info in
+  (*ctx.valspecs |> Bindings.iter (fun k _ -> print_endline ("Valspec item: " ^ (string_of_id k)));*)
   Jibc.compile_ast ctx ast
 
 let compile_ast env effect_info output_chan c_includes ast =
   try
     let cdefs, ctx = jib_of_ast env effect_info ast in
+    (*ctx.valspecs |> Bindings.iter (fun k _ -> print_endline ("Valspec item2: " ^ (string_of_id k)));*)
+  
     (* let cdefs', _ = Jib_optimize.remove_tuples cdefs ctx in *)
     let cdefs = insert_heap_returns Bindings.empty cdefs in
 
     let recursive_functions = get_recursive_functions cdefs in
     let cdefs = optimize recursive_functions cdefs in
-
+    (** new type defs here: used for optimization *)
+    (*let cdefs = insert_optimized_types cdefs in
+    let cdefs, ctx = optimize_heap_vars cdefs ctx in*)
+    ctx.valspecs |> Bindings.iter (fun k _ -> print_endline ("Valspec item3: " ^ (string_of_id k)));
     let docs = separate_map (hardline ^^ hardline) (codegen_def ctx) cdefs in
 
     let coverage_include =

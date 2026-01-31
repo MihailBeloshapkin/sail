@@ -183,11 +183,26 @@ class map_cval_visitor f : jib_visitor =
 
 let map_cval f = visit_cval (new map_cval_visitor f)
 
+class chtype_visitor flexp fval finstr : jib_visitor =
+  object
+    inherit empty_jib_visitor 
+    
+    method! vctyp _ = SkipChildren
+
+    method! vclexp clexp = ChangeDoChildrenPost (clexp, flexp)
+
+    method! vcval cval = ChangeDoChildrenPost (cval, fval)
+
+    method vinstr instr = ChangeDoChildrenPost (instr, finstr)
+  end
+
 let clexp_rename from_name to_name = visit_clexp (new rename_visitor from_name to_name)
 
 let instr_rename from_name to_name = visit_instr (new rename_visitor from_name to_name)
 
 let instrs_rename from_name to_name = visit_instrs (new rename_visitor from_name to_name)
+
+let instrs_ch_type f1 f2 f3 = visit_instrs (new chtype_visitor f1 f2 f3)
 
 (**************************************************************************)
 (* 1. Instruction pretty printer                                          *)
@@ -244,8 +259,8 @@ let string_of_op = function
 (* String representation of ctyps here is only for debugging and
    intermediate language pretty-printer. *)
 let rec string_of_ctyp = function
-  | CT_lint -> "%i"
-  | CT_fint n -> "%i" ^ string_of_int n
+  | CT_lint -> "%lint"
+  | CT_fint n -> "%fint" ^ string_of_int n
   | CT_float n -> "%f" ^ string_of_int n
   | CT_rounding_mode -> "%rounding_mode"
   | CT_lbits -> "%bv"
@@ -257,6 +272,7 @@ let rec string_of_ctyp = function
   | CT_bool -> "%bool"
   | CT_real -> "%real"
   | CT_string -> "%string"
+  | CT_sstring -> "%sstring"
   | CT_memory_writes -> "%memory_writes"
   | CT_tup ctyps -> "(" ^ Util.string_of_list ", " string_of_ctyp ctyps ^ ")"
   | CT_struct (id, _fields) -> "%struct " ^ Util.zencode_string (string_of_id id)
@@ -308,7 +324,7 @@ let string_of_value = function
   | VL_undefined -> "undefined"
 
 let rec string_of_cval = function
-  | V_id (id, _) -> string_of_name id
+  | V_id (id, ct) -> string_of_name id ^ ";" ^ string_of_ctyp ct ^ ";"
   | V_member (id, _) -> Util.zencode_string (string_of_id id)
   | V_lit (VL_undefined, ctyp) -> string_of_value VL_undefined ^ " : " ^ string_of_ctyp ctyp
   | V_lit (vl, ctyp) -> string_of_value vl
@@ -331,7 +347,7 @@ let rec string_of_cval = function
   | V_tuple (members, _) -> "(" ^ Util.string_of_list ", " string_of_cval members ^ ")"
 
 let rec string_of_clexp = function
-  | CL_id (id, ctyp) -> string_of_name id
+  | CL_id (id, ctyp) -> string_of_name id ^ string_of_ctyp ctyp
   | CL_field (clexp, field) -> string_of_clexp clexp ^ "." ^ string_of_id field
   | CL_addr clexp -> string_of_clexp clexp ^ "*"
   | CL_tuple (clexp, n) -> string_of_clexp clexp ^ "." ^ string_of_int n
@@ -389,7 +405,7 @@ let string_of_instr i = Document.to_string (doc_instr i)
 
 let rec map_ctyp f = function
   | ( CT_lint | CT_fint _ | CT_constant _ | CT_lbits | CT_fbits _ | CT_sbits _ | CT_float _ | CT_rounding_mode | CT_bit
-    | CT_unit | CT_bool | CT_real | CT_string | CT_poly _ | CT_enum _ | CT_memory_writes ) as ctyp ->
+    | CT_unit | CT_bool | CT_real | CT_string | CT_sstring | CT_poly _ | CT_enum _ | CT_memory_writes ) as ctyp ->
       f ctyp
   | CT_tup ctyps -> f (CT_tup (List.map (map_ctyp f) ctyps))
   | CT_ref ctyp -> f (CT_ref (map_ctyp f ctyp))
@@ -404,7 +420,7 @@ let rec ctyp_has pred ctyp =
   ||
   match ctyp with
   | CT_lint | CT_fint _ | CT_constant _ | CT_lbits | CT_fbits _ | CT_sbits _ | CT_float _ | CT_rounding_mode | CT_bit
-  | CT_unit | CT_bool | CT_real | CT_string | CT_poly _ | CT_enum _ | CT_memory_writes ->
+  | CT_unit | CT_bool | CT_real | CT_string | CT_sstring | CT_poly _ | CT_enum _ | CT_memory_writes ->
       false
   | CT_tup ctyps -> List.exists (ctyp_has pred) ctyps
   | CT_ref ctyp | CT_vector ctyp | CT_fvector (_, ctyp) | CT_list ctyp -> ctyp_has pred ctyp
@@ -481,6 +497,9 @@ let rec ctyp_compare ctyp1 ctyp2 =
   | CT_string, CT_string -> 0
   | CT_string, _ -> 1
   | _, CT_string -> -1
+  | CT_sstring, CT_sstring -> 0
+  | CT_sstring, _ -> 1
+  | _, CT_sstring -> -1
   | CT_ref ctyp1, CT_ref ctyp2 -> ctyp_compare ctyp1 ctyp2
   | CT_ref _, _ -> 1
   | _, CT_ref _ -> -1
@@ -554,6 +573,7 @@ let rec ctyp_suprema = function
   | CT_bit -> CT_bit
   | CT_tup ctyps -> CT_tup (List.map ctyp_suprema ctyps)
   | CT_string -> CT_string
+  | CT_sstring -> CT_sstring
   | CT_float n -> CT_float n
   | CT_rounding_mode -> CT_rounding_mode
   | CT_memory_writes -> CT_memory_writes
@@ -618,7 +638,7 @@ let rec ctyp_ids = function
   | CT_tup ctyps -> List.fold_left (fun ids ctyp -> IdSet.union (ctyp_ids ctyp) ids) IdSet.empty ctyps
   | CT_vector ctyp | CT_fvector (_, ctyp) | CT_list ctyp | CT_ref ctyp -> ctyp_ids ctyp
   | CT_lint | CT_fint _ | CT_constant _ | CT_lbits | CT_fbits _ | CT_sbits _ | CT_unit | CT_bool | CT_real | CT_bit
-  | CT_string | CT_poly _ | CT_float _ | CT_rounding_mode | CT_memory_writes ->
+  | CT_string | CT_sstring | CT_poly _ | CT_float _ | CT_rounding_mode | CT_memory_writes ->
       IdSet.empty
 
 let rec subst_poly substs = function
@@ -630,13 +650,13 @@ let rec subst_poly substs = function
   | CT_ref ctyp -> CT_ref (subst_poly substs ctyp)
   | CT_variant (id, ctors) -> CT_variant (id, List.map (fun (ctor_id, ctyp) -> (ctor_id, subst_poly substs ctyp)) ctors)
   | CT_struct (id, fields) -> CT_struct (id, List.map (fun (ctor_id, ctyp) -> (ctor_id, subst_poly substs ctyp)) fields)
-  | ( CT_lint | CT_fint _ | CT_constant _ | CT_unit | CT_bool | CT_bit | CT_string | CT_real | CT_lbits | CT_fbits _
+  | ( CT_lint | CT_fint _ | CT_constant _ | CT_unit | CT_bool | CT_bit | CT_string | CT_sstring | CT_real | CT_lbits | CT_fbits _
     | CT_sbits _ | CT_enum _ | CT_float _ | CT_rounding_mode | CT_memory_writes ) as ctyp ->
       ctyp
 
 let rec is_polymorphic = function
   | CT_lint | CT_fint _ | CT_constant _ | CT_lbits | CT_fbits _ | CT_sbits _ | CT_bit | CT_unit | CT_bool | CT_real
-  | CT_string | CT_float _ | CT_rounding_mode | CT_memory_writes ->
+  | CT_string | CT_sstring | CT_float _ | CT_rounding_mode | CT_memory_writes ->
       false
   | CT_tup ctyps -> List.exists is_polymorphic ctyps
   | CT_enum _ -> false

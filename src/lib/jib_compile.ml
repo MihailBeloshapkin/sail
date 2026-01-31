@@ -1707,6 +1707,199 @@ module Make (C : CONFIG) = struct
 
     ([CDEF_aux (CDEF_fundef (id, None, compiled_args, instrs), def_annot)] @ mapping_infallible, return_ctx)
 
+
+  let rec print_ctyp ct =
+    match ct with
+    | CT_lint -> print_string "CT_lint"
+    | CT_fint i -> print_string "CT_fint"
+    | CT_constant _ -> print_string "CT_constant"
+    | CT_lbits -> print_string "CT_lbits"
+    | CT_sbits _ -> print_string "CT_sbits"
+    | CT_fbits _ -> print_string "CT_fbits"
+    | CT_unit -> print_string "CT_unit"
+    | CT_bool -> print_string "CT_bool"
+    | CT_bit -> print_string "CT_bit"
+    | CT_string -> print_string "CT_string"
+    | CT_real -> print_string "CT_real"
+    | CT_float _ -> print_string "CT_float"
+    | CT_rounding_mode _ -> print_string "CT_rounding_mode"
+    | CT_tup ctl -> print_string "CT_tup"
+    | CT_enum _ -> print_string "CT_enum"
+    | CT_struct _ -> print_string "CT_struct"
+    | CT_variant _ -> print_string "CT_variant"
+    | CT_fvector (i, ct) ->
+        print_string ("CT_fvector [ " ^ string_of_int i);
+        print_ctyp ct;
+        print_endline "]"
+    | CT_vector ct ->
+        print_string "CT_vector [";
+        print_ctyp ct;
+        print_endline "]"
+    | CT_list _ -> print_string "CT_list"
+    | CT_ref _ -> print_string "CT_ref"
+    | CT_poly _ -> print_string "CT_poly"
+    | CT_memory_writes -> print_string "CT_memory_writes"
+
+  let print_lexp l =
+    match l with
+    | CL_id (Name (id, i), ct) -> print_string (string_of_id id ^ " " ^ string_of_int i)
+    | _ -> print_string "Lexp: other"
+
+  let print_op = function
+    | Bnot -> print_endline "Bnot"
+    | Bor -> print_endline "Bor"
+    | Band -> print_endline "Band"
+    | List_hd -> print_endline "List_hd"
+    | List_tl -> print_endline "List_tl"
+    | List_is_empty -> print_endline "List_is_empty"
+    | Eq -> print_endline "Eq"
+    | Neq -> print_endline "Neq"
+    | Ite -> print_endline "Ite"
+    | Get_abstract -> print_endline "Get_abstract"
+    | Ilt -> print_endline "Ilt"
+    | Ilteq -> print_endline "Ilteq"
+    | Igt -> print_endline "Itg"
+    | Igteq -> print_endline "Igteq"
+    | Iadd -> print_endline "Iadd"
+    | Isub -> print_endline "Isub"
+    | Unsigned i -> print_endline "Unsigned"
+    | Signed i -> print_endline "Signed"
+    | Bvnot -> print_endline "Bvnot"
+    | Bvor -> print_endline "Bvor"
+    | Bvand -> print_endline "Bvand"
+    | Bvxor -> print_endline "Bvxor"
+    | Bvadd -> print_endline "Bvadd"
+    | Bvsub -> print_endline "Bvsub"
+    | Bvaccess -> print_endline "Bvaccess"
+    | Concat -> print_endline "Concat"
+    | Zero_extend i -> print_endline "Zero_extend"
+    | Sign_extend i -> print_endline "Sign_extend"
+    | Slice i -> print_endline "Slice"
+    | Sslice i -> print_endline "Sslice"
+    | Set_slice -> print_endline "Set_slice"
+    | Replicate i -> print_endline "Replicate"
+
+  let print_vl v =
+    match v with
+    | VL_bits _ -> print_string "VL_bits"
+    | VL_bit _ -> print_string "VL_bit"
+    | VL_bool _ -> print_string " VL_bool"
+    | VL_unit -> print_string "VL_unit"
+    | VL_int _ -> print_string "VL_int"
+    | VL_string _ -> print_string "VL_string"
+    | VL_real _ -> print_string "VL_real"
+    | VL_enum _ -> print_string "VL_enum"
+    | VL_ref _ -> print_string "VL_ref"
+    | VL_undefined -> print_string "VL_undefined"
+
+  let rec print_cval cv =
+    match cv with
+    | V_id (Name (i, n), ct) ->
+        print_endline ("V_id [" ^ string_of_id i ^ "; " ^ string_of_int n);
+        print_ctyp ct;
+        print_endline "]"
+    | V_member _ -> print_endline "v_member"
+    | V_lit (v, ct) ->
+        print_endline "V_lit [";
+        print_vl v;
+        print_ctyp ct;
+        print_endline "]"
+    | V_tuple _ -> print_endline "V_tuple"
+    | V_struct _ -> print_endline "V_struct"
+    | V_ctor_kind _ -> print_endline "V_ctor_kind"
+    | V_ctor_unwrap _ -> print_endline "V_ctor_unwrap"
+    | V_tuple_member _ -> print_endline "V_tuple_member"
+    | V_call (o, l) ->
+        print_endline "V_call [";
+        List.iter print_cval l;
+        print_endline "op:";
+        print_op o;
+        print_endline "]"
+    | V_field _ -> print_endline "V_field"
+    | _ ->
+        print_endline "Other";
+        ()
+
+  let rec print_i (I_aux (i, _)) =
+    print_endline "Instruction:";
+    match i with
+    | I_decl (ctyp, Name (i, n)) ->
+        print_string "I_decl [";
+        print_string (string_of_id i ^ "; " ^ string_of_int n);
+        print_ctyp ctyp;
+        print_string "]";
+        print_endline ""
+    | I_init (ctyp, Name(i, n), cv) -> 
+      print_endline "I_init [";
+      print_string (string_of_id i ^ "; " ^ string_of_int n);
+      print_endline "ctyp:";
+      print_ctyp ctyp;
+      print_endline "cval:";
+      print_cval cv;
+      print_endline "]";
+      print_endline "";
+    | I_jump (cv, s) ->
+        print_endline "I_jump [";
+        print_cval cv;
+        print_string s;
+        print_endline "]"
+    | I_goto _ -> print_endline "I_goto"
+    | I_label _ -> print_endline "I_label"
+    | I_funcall (CR_one x, se, (id, ctl), ctv) ->
+        print_endline ("I_funcall [ " ^ string_of_id id ^ " extern: " ^ string_of_bool se);
+        print_endline "Types:";
+        List.iter print_ctyp ctl;
+        print_endline "Values:";
+        List.iter print_cval ctv;
+        print_endline "Lexp:";
+        print_lexp x;
+        print_endline "]"
+    | I_copy (cl, cv) ->
+        print_endline "I_copy [";
+        print_cval cv;
+        print_endline "]"
+    | I_clear (ct, _) ->
+        print_endline "I_clear [";
+        print_ctyp ct;
+        print_endline "]"
+    | I_undefined _ -> print_endline "I_undefined"
+    | I_exit _ -> print_endline "I_exit"
+    | I_end _ -> print_endline "I_end"
+    | I_if (cv, l1, l2, ct) ->
+        print_endline "I_if [";
+        print_cval cv;
+        print_ctyp ct;
+        List.iter print_i l1;
+        List.iter print_i l2;
+        print_endline "]"
+    | I_block il ->
+        print_endline "I_block [";
+        List.iter print_i il;
+        print_endline "]"
+    | I_try_block l1 ->
+        print_endline "I_try_block [";
+        List.iter print_i l1;
+        print_endline "]"
+    | I_throw _ -> print_endline "I_throw"
+    | I_comment _ -> print_endline "I_Comment"
+    | I_raw _ -> print_endline "I_raw"
+    | I_return _ -> print_endline "I_return"
+    | I_reset _ -> print_endline "I_reset"
+    | I_reinit _ -> print_endline "I_reinit"
+    | _ ->
+        print_endline "Other";
+        ()
+
+  let print_cdef suf (CDEF_aux (c, _)) =
+    match c with
+    | CDEF_fundef (id1, id2, idlist, instrs) ->
+        print_endline ("print_cdef " ^ suf ^ string_of_id id1);
+        List.iter (fun i -> print_string (string_of_id i ^ ";")) idlist;
+        List.iter print_i instrs;
+        print_endline "===="
+    | _ -> ()
+
+
   (** Compile a Sail toplevel definition into an IR definition **)
   let rec compile_def n total ctx (DEF_aux (aux, _) as def) =
     match aux with

@@ -263,11 +263,15 @@ bool write_ram(const mpz_t addr_size,     // Either 32 or 64
 	       const lbits addr_bv,
 	       const lbits data)
 {
-  uint64_t addr = mpz_get_ui(*addr_bv.bits);
+  //uint64_t addr = mpz_get_ui(*addr_bv.bits);
+  //uint64_t data_size = mpz_get_ui(data_size_mpz);
+  uint64_t addr = uint64_from_lbits(addr_bv);
   uint64_t data_size = mpz_get_ui(data_size_mpz);
 
   mpz_t buf;
-  mpz_init_set(buf, *data.bits);
+  mpz_init(buf);
+  mpz_t_from_lbits(buf, data);
+  //mpz_init_set(buf, *data.bits);
 
   uint64_t byte;
   for(uint64_t i = 0; i < data_size; ++i) {
@@ -304,20 +308,31 @@ void read_ram(lbits *data,
 	      const lbits hex_ram,
 	      const lbits addr_bv)
 {
-  uint64_t addr = mpz_get_ui(*addr_bv.bits);
+  uint64_t addr = uint64_from_lbits(addr_bv);
   uint64_t data_size = mpz_get_ui(data_size_mpz);
 
-  mpz_set_ui(*data->bits, 0);
+  if (data_size <= 64) {
+    uint64_t byte = 0;
+    check_and_clear_lbits(data);
+    data->data.short_bits = 0;
+    for(uint64_t i = data_size; i > 0; --i) {
+      data->data.short_bits = (data->data.short_bits << 8) + read_mem(addr + (i - 1));
+    }
+    //data->type = 0;
+    return;
+  }
+  check_and_alloc_lbits(data);
+  mpz_set_ui(*data->data.long_bits, 0);
   data->len = data_size * 8;
 
   mpz_t byte;
   mpz_init(byte);
   for(uint64_t i = data_size; i > 0; --i) {
     mpz_set_ui(byte, read_mem(addr + (i - 1)));
-    mpz_mul_2exp(*data->bits, *data->bits, 8);
-    mpz_add(*data->bits, *data->bits, byte);
+    mpz_mul_2exp(*data->data.long_bits, *data->data.long_bits, 8);
+    mpz_add(*data->data.long_bits, *data->data.long_bits, byte);
   }
-
+  //data->type = 1;
   mpz_clear(byte);
 }
 
@@ -337,12 +352,16 @@ void platform_read_mem(lbits *data,
     mpz_t mpz_addr_size;
     mpz_init(mpz_addr_size);
     mpz_set_ui(mpz_addr_size, addr_size);
-    mpz_t addr_bv;
-    mpz_init(addr_bv);
-    mpz_set_ui(addr_bv, addr.bits);
-    read_ram(data, mpz_addr_size, n, (lbits){.len=0, .bits=NULL}, (lbits){.len=addr.len, .bits=&addr_bv});
+    //mpz_t addr_bv;
+    //mpz_init(addr_bv);
+    //mpz_set_ui(addr_bv, addr.bits);
+    lbits arg2;
+    arg2.type = 0;
+    arg2.data.short_bits = addr.bits;
+    arg2.len = addr.len;
+    read_ram(data, mpz_addr_size, n, (lbits){.len=0, .type = 0}, arg2);
     mpz_clear(mpz_addr_size);
-    mpz_clear(addr_bv);
+    //mpz_clear(addr_bv);
   }
 }
 
@@ -363,12 +382,17 @@ bool platform_write_mem(const int write_kind,
     mpz_t mpz_addr_size;
     mpz_init(mpz_addr_size);
     mpz_set_ui(mpz_addr_size, addr_size);
-    mpz_t addr_bv;
-    mpz_init(addr_bv);
-    mpz_set_ui(addr_bv, addr.bits);
-    bool res = write_ram(mpz_addr_size, n, (lbits){.len=0, .bits=NULL}, (lbits){.len=addr.len, .bits=&addr_bv}, data);
+    //mpz_t addr_bv;
+    //mpz_init(addr_bv);
+    //mpz_set_ui(addr_bv, addr.bits);
+    lbits arg2;
+    arg2.type = 0;
+    arg2.data.short_bits = addr.bits;
+    arg2.len = addr.len;
+    
+    bool res = write_ram(mpz_addr_size, n, (lbits){.len=0, .type = 0}, arg2, data);
     mpz_clear(mpz_addr_size);
-    mpz_clear(addr_bv);
+    //mpz_clear(addr_bv);
     return res;
 }
 
@@ -508,8 +532,15 @@ void trace_unit(const unit u) {
   if (g_trace_enabled) fputs("()", stderr);
 }
 
-void trace_sail_string(const_sail_string str) {
-  if (g_trace_enabled) fputs(str, stderr);
+void trace_sail_string(sail_string str) {
+  if (g_trace_enabled) {
+    if (str.type == 0) {
+      fputs(str.data.short_str, stderr);
+    }
+    else {
+      fputs(str.data.long_str, stderr);
+    }
+  }
 }
 
 void trace_sail_int(const sail_int op) {
@@ -517,7 +548,7 @@ void trace_sail_int(const sail_int op) {
 }
 
 void trace_lbits(const lbits op) {
-  if (g_trace_enabled) fprint_bits("", op, "", stderr);
+  if (g_trace_enabled) fprint_bits(string_of_lit(""), op, string_of_lit(""), stderr);
 }
 
 void trace_bool(const bool b) {

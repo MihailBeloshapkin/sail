@@ -108,6 +108,7 @@ val cval_rename : name -> name -> cval -> cval
 val clexp_rename : name -> name -> clexp -> clexp
 val instr_rename : name -> name -> instr -> instr
 val instrs_rename : name -> name -> instr list -> instr list
+val instrs_ch_type : (clexp -> clexp) -> (cval -> cval) -> (instr -> instr) -> instr list -> instr list
 
 val string_of_name : ?deref_current_exception:bool -> ?zencode:bool -> name -> string
 val string_of_op : op -> string
