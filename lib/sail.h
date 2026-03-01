@@ -135,6 +135,10 @@ bool UNDEFINED(bool)(const unit);
 
 #define STR_BUF 100
 
+#define IS_SHORT(x) ((x) != NULL && (x)->type == 0)
+
+#define IS_LONG(x) ((x) != NULL && (x)->type == 1)
+
 typedef struct {
         size_t len;
         int type; // 0 - static, 1 - dynamic
@@ -268,8 +272,20 @@ typedef struct {
 
 typedef struct {
   mp_bitcnt_t len;
-  mpz_t *bits;
+  int type;
+  union {
+	  uint64_t short_bits;
+	  mpz_t *long_bits;
+  } data;
 } lbits;
+
+uint64_t uint64_from_lbits(lbits op);
+
+void mpz_t_from_lbits(mpz_t out, lbits op);
+
+void check_and_alloc_lbits(lbits *rop);
+
+void check_and_clear_lbits(lbits *rop);
 
 // For backwards compatibility
 typedef uint64_t mach_bits;
@@ -538,7 +554,7 @@ void get_time_ns(sail_int*, const unit);
 
 /* ***** ARM optimisations ***** */
 
-void arm_align(lbits *, const lbits, const sail_int);
+//void arm_align(lbits *, const lbits, const sail_int);
 
 #ifdef __cplusplus
 }
