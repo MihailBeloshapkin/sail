@@ -270,14 +270,14 @@ typedef struct {
   uint64_t bits;
 } sbits;
 
-enum vec_type {
+typedef enum {
 	SHORT = 0,
 	LONG = 1
-};
+} vec_type;
 
 typedef struct {
   mp_bitcnt_t len;
-  int type;
+  vec_type type;
   union {
 	  uint64_t short_bits;
 	  mpz_t *long_bits;

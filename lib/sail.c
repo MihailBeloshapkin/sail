@@ -704,23 +704,17 @@ void CREATE(lbits)(lbits *rop)
   rop->type = 0;
   rop->len = 0;
   rop->data.short_bits = 0;
-  rop->data.long_bits = NULL;
-//  rop->bits = (mpz_t *)sail_malloc(sizeof(mpz_t));
-//  rop->len = 0;
-//  mpz_init(*rop->bits);
 }
 
 void RECREATE(lbits)(lbits *rop)
 {
   rop->len = 0;
   if (IS_LONG(rop)) {
-    //set_ui_to_lbits_long_data(rop, 0ULL);
     mpz_set_ui(*rop->data.long_bits, 0);
   }
   else {
     rop->data.short_bits = 0;
   }
-//  mpz_set_ui(*rop->bits, 0);
 }
 
 void COPY(lbits)(lbits *rop, const lbits op)
@@ -728,12 +722,10 @@ void COPY(lbits)(lbits *rop, const lbits op)
   if (op.len <= 64) {
     check_and_clear_lbits(rop);
     rop->data.short_bits = uint64_from_lbits(op);
-    //rop->type = 0;
   }
   else {
     check_and_alloc_lbits(rop);
     mpz_set(*rop->data.long_bits, *op.data.long_bits);
-    //rop->type = 1;
   }
   rop->len = op.len;
 }
@@ -752,9 +744,6 @@ void CREATE_OF(lbits, fbits)(lbits *rop, const uint64_t op, const uint64_t len, 
   rop->len = len;
   rop->type = 0;
   rop->data.short_bits = op;
-//  rop->bits = (mpz_t *)sail_malloc(sizeof(mpz_t));
-//  rop->len = len;
-//  mpz_init_set_ui(*rop->bits, op);
 }
 
 fbits CREATE_OF(fbits, lbits)(const lbits op, const bool direction)
@@ -786,9 +775,7 @@ void RECREATE_OF(lbits, fbits)(lbits *rop, const uint64_t op, const uint64_t len
     rop->data.short_bits = op;  
   }
   else {
-    //rop->type = 1;
     set_ui_to_lbits_long_data(rop, op);
-    //mpz_set_ui(*rop->data.long_bits, op);
   }
 }
 
@@ -799,10 +786,8 @@ void CREATE_OF(lbits, sbits)(lbits *rop, const sbits op, const bool direction)
     rop->data.short_bits = op.bits;
   }
   else {
-    //rop->type = 1;
     rop->data.long_bits = (mpz_t *)sail_malloc(sizeof(mpz_t));
     set_ui_to_lbits_long_data(rop, op.bits);
-    //mpz_init_set_ui(*rop->data.long_bits, op.bits);
   }
   rop->len = op.len;
 }
