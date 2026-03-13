@@ -167,6 +167,7 @@ ctyp :: 'CT_' ::=
   | bool_t                    :: :: bool
   | bit                       :: :: bit
   | string_t                  :: :: string
+  | sstring_t 		      :: :: sstring 
 
 % The real type in sail. Abstract here, so the code generator can
 % choose to implement it using either GMP rationals or high-precision

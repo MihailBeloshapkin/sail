@@ -691,7 +691,7 @@ let add_local_labels instrs =
 (* 5. Optimizations                                                       *)
 (**************************************************************************)
 
-let hoist_ctyp = function CT_lint | CT_lbits | CT_struct _ | CT_string -> true | _ -> false
+let hoist_ctyp = function CT_lint | CT_lbits | CT_struct _  -> true | _ -> false
 
 let hoist_counter = ref 0
 let hoist_id () =
@@ -1740,6 +1740,8 @@ let optimize recursive_functions cdefs =
   cdefs
   |> (if !optimize_alias then concatMap remove_alias else nothing)
   |> (if !optimize_alias then combine_variables else nothing)
+  |> 
+  if !optimize_hoist_allocations && not !opt_no_rts then concatMap (hoist_allocations recursive_functions) else nothing
   (* We need the runtime to initialize hoisted allocations *)
   (*|>
   (if !optimize_hoist_allocations && not !opt_no_rts then
@@ -2913,7 +2915,7 @@ let codegen_def' ctx (CDEF_aux (aux, da)) =
         let branch_coverage = !opt_branch_coverage
       end)) in
       
-      if string_of_id id = "vector_other_example" then Jibc.print_cdef "4" (CDEF_aux (aux, da));
+      (*if string_of_id id = "step" then Jibc.print_cdef "4" (CDEF_aux (aux, da));*)
       
       function_header ^^ string "{"
       ^^ jump 0 2 (separate_map hardline (codegen_instr id ctx) instrs)
