@@ -269,6 +269,7 @@ bool write_ram(const mpz_t addr_size,     // Either 32 or 64
   uint64_t data_size = mpz_get_ui(data_size_mpz);
 
   mpz_t buf;
+  mpz_init(buf);
   mpz_t_from_lbits(buf, data);
   //mpz_init_set(buf, *data.bits);
 

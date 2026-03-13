@@ -73,7 +73,7 @@ uint64_t bzhi_u64(uint64_t bits, uint64_t len)
  * use in functions that do not call other functions in this file.
  */
 static sail_int sail_lib_tmp1, sail_lib_tmp2, sail_lib_tmp3;
-static mpz_t tmp_bitvector1;
+static mpz_t tmp_bitvector1, tmp_bitvector2;
 static real sail_lib_tmp_real;
 
 #define FLOAT_PRECISION 255
@@ -82,6 +82,7 @@ void setup_library(void)
 {
   srand(0x0);
   mpz_init(tmp_bitvector1);
+  mpz_init(tmp_bitvector2);
   mpz_init(sail_lib_tmp1);
   mpz_init(sail_lib_tmp2);
   mpz_init(sail_lib_tmp3);
@@ -92,6 +93,7 @@ void setup_library(void)
 void cleanup_library(void)
 {
   mpz_clear(tmp_bitvector1);
+  mpz_clear(tmp_bitvector2);
   mpz_clear(sail_lib_tmp1);
   mpz_clear(sail_lib_tmp2);
   mpz_clear(sail_lib_tmp3);
@@ -106,15 +108,17 @@ uint64_t uint64_from_lbits(lbits op) {
 }
 
 void mpz_t_from_lbits(mpz_t out, lbits op) {
-  mpz_init(out);
+  //mpz_init(out);
   if (op.type == 1) {
     mpz_set(out, *op.data.long_bits);
+    return;
   }
   mpz_set_ui(out, op.data.short_bits);
 }
 
 void set_ui_to_lbits_long_data(lbits *rop, uint64_t op) {
   if (IS_SHORT(rop)) {
+    //printf("Sail malloc\n");
     rop->data.long_bits = (mpz_t *)sail_malloc(sizeof(mpz_t));
     mpz_init(*rop->data.long_bits);
   }
@@ -124,6 +128,7 @@ void set_ui_to_lbits_long_data(lbits *rop, uint64_t op) {
 
 void check_and_alloc_lbits(lbits *rop) {
   if (IS_SHORT(rop)) {
+    //printf("Sail malloc\n");
     rop->data.long_bits = (mpz_t *)sail_malloc(sizeof(mpz_t));
     mpz_init(*rop->data.long_bits);
   }
@@ -709,8 +714,8 @@ void RECREATE(lbits)(lbits *rop)
 {
   rop->len = 0;
   if (IS_LONG(rop)) {
-    set_ui_to_lbits_long_data(rop, 0ULL);
-    //mpz_set_ui(*rop->data.long_bits, 0);
+    //set_ui_to_lbits_long_data(rop, 0ULL);
+    mpz_set_ui(*rop->data.long_bits, 0);
   }
   else {
     rop->data.short_bits = 0;
@@ -919,10 +924,10 @@ void normalize_lbits(lbits *rop) {
 void append_64(lbits *rop, const lbits op, const fbits chunk)
 {
   rop->len = rop->len + 64ul;
-  mpz_t op_data;
-  mpz_t_from_lbits(op_data, op);
+  //mpz_t op_data;
+  mpz_t_from_lbits(tmp_bitvector1, op);
   check_and_alloc_lbits(rop);
-  mpz_mul_2exp(*rop->data.long_bits, op_data, 64ul);
+  mpz_mul_2exp(*rop->data.long_bits, tmp_bitvector1, 64ul);
   mpz_add_ui(*rop->data.long_bits, *rop->data.long_bits, chunk);
 }
 
@@ -1209,24 +1214,24 @@ void length_lbits(sail_int *rop, const lbits op)
 
 void count_leading_zeros(sail_int *rop, const lbits op)
 {
-  mpz_t op_data;
-  mpz_t_from_lbits(op_data, op);
-  if (mpz_cmp_ui(op_data, 0) == 0) {
+  // mpz_t op_data;
+  mpz_t_from_lbits(tmp_bitvector1, op);
+  if (mpz_cmp_ui(tmp_bitvector1, 0) == 0) {
     mpz_set_ui(*rop, op.len);
   } else {
-    size_t bits = mpz_sizeinbase(op_data, 2);
+    size_t bits = mpz_sizeinbase(tmp_bitvector1, 2);
     mpz_set_ui(*rop, op.len - bits);
   }
 }
 
 void count_trailing_zeros(sail_int *rop, const lbits op)
 {
-  mpz_t op_data;
-  mpz_t_from_lbits(op_data, op);
-  if (mpz_cmp_ui(op_data, 0) == 0) {
+  // mpz_t op_data;
+  mpz_t_from_lbits(tmp_bitvector1, op);
+  if (mpz_cmp_ui(tmp_bitvector1, 0) == 0) {
     mpz_set_ui(*rop, op.len);
   } else {
-    mp_bitcnt_t ix = mpz_scan1(op_data, 0);
+    mp_bitcnt_t ix = mpz_scan1(tmp_bitvector1, 0);
     mpz_set_ui(*rop, ix);
   }
 }
@@ -1286,9 +1291,9 @@ void vector_subrange_lbits(lbits *rop,
   else {
     //rop->type = 1;
     check_and_alloc_lbits(rop);
-    mpz_t op_data;
-    mpz_t_from_lbits(op_data, op);
-    mpz_fdiv_q_2exp(*rop->data.long_bits, op_data, m);
+    //mpz_t op_data;
+    mpz_t_from_lbits(tmp_bitvector1, op);
+    mpz_fdiv_q_2exp(*rop->data.long_bits, tmp_bitvector1, m);
   }
   normalize_lbits(rop);
 }
@@ -1309,9 +1314,9 @@ void vector_subrange_inc_lbits(lbits *rop,
   }
   else {
     check_and_alloc_lbits(rop);
-    mpz_t op_data;
-    mpz_t_from_lbits(op_data, op);
-    mpz_fdiv_q_2exp(*rop->data.long_bits, op_data, (op.len - 1) - m);
+    //mpz_t op_data;
+    mpz_t_from_lbits(tmp_bitvector1, op);
+    mpz_fdiv_q_2exp(*rop->data.long_bits, tmp_bitvector1, (op.len - 1) - m);
   }
   normalize_lbits(rop);
 }
@@ -1447,13 +1452,13 @@ void append(lbits *rop, const lbits op1, const lbits op2)
     rop->type = 0;
   }
   else {
-    mpz_t op1_data;
-    mpz_t_from_lbits(op1_data, op1);
-    mpz_t op2_data;
-    mpz_t_from_lbits(op2_data, op2);
+    //mpz_t op1_data;
+    mpz_t_from_lbits(tmp_bitvector1, op1);
+    //mpz_t op2_data;
+    mpz_t_from_lbits(tmp_bitvector2, op2);
     check_and_alloc_lbits(rop);
-    mpz_mul_2exp(*rop->data.long_bits, op1_data, op2.len);
-    mpz_ior(*rop->data.long_bits, *rop->data.long_bits, op2_data);
+    mpz_mul_2exp(*rop->data.long_bits, tmp_bitvector1, op2.len);
+    mpz_ior(*rop->data.long_bits, *rop->data.long_bits, tmp_bitvector2);
   }
 }
 
@@ -1498,11 +1503,11 @@ void replicate_bits(lbits *rop, const lbits op1, const mpz_t op2)
     check_and_alloc_lbits(rop);
     set_ui_to_lbits_long_data(rop, 0ULL);
     //mpz_set_ui(*rop->data.long_bits, 0);
-    mpz_t op1_data;
-    mpz_t_from_lbits(op1_data, op1);
+    //mpz_t op1_data;
+    mpz_t_from_lbits(tmp_bitvector1, op1);
     for (int i = 0; i < op2_ui; i++) {
       mpz_mul_2exp(*rop->data.long_bits, *rop->data.long_bits, op1.len);
-      mpz_ior(*rop->data.long_bits, *rop->data.long_bits, op1_data);
+      mpz_ior(*rop->data.long_bits, *rop->data.long_bits, tmp_bitvector1);
     } 
   }
 }
@@ -1552,7 +1557,7 @@ void get_slice_int(lbits *rop, const sail_int len_mpz, const sail_int n, const s
     //mpz_set_ui(*rop->data.long_bits, 0ul);
     rop->type = 1;
     for (uint64_t i = 0; i < len; i++) {
-      if (mpz_tstbit(n, i + start)) mpz_setbit(*rop->data.long_bits, i);
+      if (mpz_tstbit(n, i + start)) { mpz_setbit(*rop->data.long_bits, i); }
     }
   }
 }
@@ -1568,10 +1573,10 @@ void set_slice_int(sail_int *rop,
   uint64_t start = mpz_get_ui(start_mpz);
 
   mpz_set(*rop, n);
-  mpz_t slice_data;
-  mpz_t_from_lbits(slice_data, slice);
+  //mpz_t slice_data;
+  mpz_t_from_lbits(tmp_bitvector1, slice);
   for (uint64_t i = 0; i < slice.len; i++) {
-    if (mpz_tstbit(slice_data, i)) {
+    if (mpz_tstbit(tmp_bitvector1, i)) {
       mpz_setbit(*rop, i + start);
     } else {
       mpz_clrbit(*rop, i + start);
@@ -1691,15 +1696,15 @@ void vector_update_subrange_inc_lbits(lbits *rop,
   uint64_t m = mpz_get_ui(m_mpz);
 
   check_and_alloc_lbits(rop);
-  mpz_t op_data;
-  mpz_t_from_lbits(op_data, op);
-  mpz_set(*rop->data.long_bits, op_data);
+  //mpz_t op_data;
+  mpz_t_from_lbits(tmp_bitvector1, op);
+  mpz_set(*rop->data.long_bits, tmp_bitvector1);
   rop->len = op.len;
   mpz_t slice_data;
-  mpz_t_from_lbits(slice_data, slice);
+  mpz_t_from_lbits(tmp_bitvector2, slice);
   for (uint64_t i = 0; i < m - (n - 1ul); i++) {
     uint64_t out_bit = ((op.len - 1) - m) + i;
-    if (mpz_tstbit(slice_data, (slice.len - 1) - i)) {
+    if (mpz_tstbit(tmp_bitvector2, (slice.len - 1) - i)) {
       mpz_setbit(*rop->data.long_bits, out_bit);
     } else {
       mpz_clrbit(*rop->data.long_bits, out_bit);
@@ -2360,17 +2365,17 @@ void string_of_lbits(sail_string *str, const lbits op)
     sail_free(str->data.long_str);
   }
   str->type = 1;
-  mpz_t op_data;
-  mpz_t_from_lbits(op_data, op);
+  //mpz_t op_data;
+  mpz_t_from_lbits(tmp_bitvector1, op);
   if ((op.len % 4) == 0) {
-    gmp_asprintf(&(str->data.long_str), "0x%*0ZX", op.len / 4, op_data);
+    gmp_asprintf(&(str->data.long_str), "0x%*0ZX", op.len / 4, tmp_bitvector1);
     str->len = strlen(str->data.long_str);
   } else {
     str->data.long_str = (char *) sail_malloc((op.len + 3) * sizeof(char));
     str->data.long_str[0] = '0';
     str->data.long_str[1] = 'b';
     for (int i = 1; i <= op.len; ++i) {
-      str->data.long_str[i + 1] = mpz_tstbit(op_data, op.len - i) + 0x30;
+      str->data.long_str[i + 1] = mpz_tstbit(tmp_bitvector1, op.len - i) + 0x30;
     }
     str->data.long_str[op.len + 2] = '\0';
   }
@@ -2390,9 +2395,9 @@ void decimal_string_of_fbits(sail_string *str, const fbits op)
 void decimal_string_of_lbits(sail_string *str, const lbits op)
 {
   //sail_free(str->data.short_str);
-  mpz_t op_data;
-  mpz_t_from_lbits(op_data, op);
-  gmp_asprintf(&(str->data.long_str), "%Z", op_data);
+  //mpz_t op_data;
+  mpz_t_from_lbits(tmp_bitvector1, op);
+  gmp_asprintf(&(str->data.long_str), "%Z", tmp_bitvector1);
   str->len = strlen(str->data.long_str);
   str->type = 1;
 }
@@ -2487,12 +2492,12 @@ void fprint_bits(sail_string pre,
     fputs(pre.data.long_str, stream);
   }
   
-  mpz_t op_data;
-  mpz_t_from_lbits(op_data, op);
+  //mpz_t op_data;
+  mpz_t_from_lbits(tmp_bitvector1, op);
   if (op.len % 4 == 0) {
     fputs("0x", stream);
     mpz_t buf;
-    mpz_init_set(buf, op_data);
+    mpz_init_set(buf, tmp_bitvector1);
 
     char *hex = (char *)sail_malloc((op.len / 4) * sizeof(char));
 
@@ -2511,7 +2516,7 @@ void fprint_bits(sail_string pre,
   } else {
     fputs("0b", stream);
     for (int i = op.len; i > 0; --i) {
-      fputc(mpz_tstbit(op_data, i - 1) + 0x30, stream);
+      fputc(mpz_tstbit(tmp_bitvector1, i - 1) + 0x30, stream);
     }
   }
   

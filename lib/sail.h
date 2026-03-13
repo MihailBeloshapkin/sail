@@ -133,7 +133,7 @@ bool UNDEFINED(bool)(const unit);
 //typedef char *sail_string;
 //typedef const char *sail_string;
 
-#define STR_BUF 100
+#define STR_BUF 24
 
 #define IS_SHORT(x) ((x) != NULL && (x)->type == 0)
 
@@ -269,6 +269,11 @@ typedef struct {
   uint64_t len;
   uint64_t bits;
 } sbits;
+
+enum vec_type {
+	SHORT = 0,
+	LONG = 1
+};
 
 typedef struct {
   mp_bitcnt_t len;
